@@ -1,34 +1,29 @@
 # dominaite-go
 
 Server-side Go client for the Dominaite merchant API. One call from your backend opens a
-hosted checkout session; a two-line script tag renders the payment widget on your page. Card
-details go straight from your customer's browser into the payment widget - they never touch
-your server, which keeps your PCI scope minimal (SAQ A).
+hosted checkout session; a two-line script tag renders the payment widget on your page; a
+signed webhook tells you when the money actually arrived. Card details go straight from your
+customer's browser into the payment widget - they never touch your server, which keeps your
+PCI scope minimal (SAQ A).
 
 Go 1.21 or newer. Zero dependencies: `crypto/hmac`, `crypto/sha256`, `net/http`,
 `encoding/json`, all standard library.
 
 ## Install
 
-The module path is `github.com/dominaite/merchant-sdk-go`, and it is a **placeholder**: the
-repo does not exist yet and the final name is an open owner decision. npm settled on
-`@dominaite/merchant-sdk` and PyPI on `dominaite` (2026-08-17), so whatever repo this lands in
-should keep the same family. Until the repo exists, use a local checkout with a `replace`:
-
 ```bash
-go mod edit -require=github.com/dominaite/merchant-sdk-go@v0.0.0
-go mod edit -replace=github.com/dominaite/merchant-sdk-go=/path/to/dominaite-go-sdk
-go mod tidy
+go get github.com/dominaite/merchant-sdk-go
 ```
 
-Once the repo is published, drop the `replace` and `go get` it normally.
+```go
+import dominaite "github.com/dominaite/merchant-sdk-go"
+```
 
 To work on the SDK itself:
 
 ```bash
-cd dominaite-go-sdk
 go vet ./...
-go test ./...      # includes the offline signing vector
+go test ./...      # includes the offline signing and webhook vectors
 ```
 
 ## Credentials
@@ -46,16 +41,27 @@ on NTP - signatures older than 5 minutes are rejected with `TIMESTAMP_OUT_OF_RAN
 If the key has an IP allowlist, calls from anywhere else fail with `IP_NOT_ALLOWED`. The
 allowlist is managed on the same dashboard tab.
 
-## Quickstart (zero to a signed session against dev)
+A webhook endpoint has a **third** secret, separate from the two above: `whsec_...`, shown once
+when you create the endpoint on the **Webhooks** tab. It signs deliveries to you rather than
+requests from you, so it is never sent anywhere - see [Webhooks](#webhooks).
+
+## Quickstart (zero to a paid order)
 
 Everything below is copy-paste. It assumes an empty directory and nothing installed.
+
+A complete integration is three moving parts, and you want all three:
+
+1. **Create a session** from your backend, and render the widget with what it returns.
+2. **Receive a webhook** when the payment resolves. This is how you learn you were paid.
+3. **Reconcile on a schedule**, because no webhook system delivers everything forever.
+
+Steps 1 and 2 are below. Step 3 is not optional; see
+[Reconciliation is still mandatory](#reconciliation-is-still-mandatory).
 
 ```bash
 mkdir my-checkout && cd my-checkout
 go mod init example.com/my-checkout
-go mod edit -require=github.com/dominaite/merchant-sdk-go@v0.0.0
-go mod edit -replace=github.com/dominaite/merchant-sdk-go=/path/to/dominaite-go-sdk
-go mod tidy
+go get github.com/dominaite/merchant-sdk-go
 ```
 
 Set your credentials and the environment you are pointing at:
@@ -63,6 +69,7 @@ Set your credentials and the environment you are pointing at:
 ```bash
 export DOMINAITE_KEY_ID=dmk_...      # Website integration tab
 export DOMINAITE_SECRET=dms_...      # shown once when you generated the key
+export DOMINAITE_WEBHOOK_SECRET=whsec_...  # shown once when you created the endpoint
 # Dev: the payments function app, whose Azure Functions route prefix is /api.
 # Confirm the host for your environment before the first call.
 export DOMINAITE_BASE_URL=https://func-dom-gw-payments-dev-gwc-01.azurewebsites.net/api
@@ -92,6 +99,8 @@ log.Printf("merchant %s, clock skew %ds", ping.MerchantID, ping.ClockSkewSeconds
 
 Watch `ClockSkewSeconds`: the gateway rejects requests once it passes 300, so a number that
 keeps growing is your cue to fix NTP before payments start failing.
+
+### Step 1: create a session
 
 `main.go`:
 
@@ -170,14 +179,229 @@ A successful run prints `TransactionID`, `OrderID`, `CashierKey`, `CashierToken`
 `CashierKey` and `CashierToken` are per-payment session values, not credentials - but
 HTML-escape them when you template them into the page (`html/template` does it for you).
 
-That's the whole integration: the session call, the script tag, and your domain bound to your
-checkout by Dominaite during onboarding.
-
 There is a runnable version of the above in `examples/create-session/main.go` in this repo - it
-mints a session and reads the status back, using the same three environment variables:
+mints a session and reads the status back, using the same environment variables:
 
 ```bash
 go run ./examples/create-session
+```
+
+### Step 2: receive the webhook
+
+The payer finishes on the widget, not on your site, so the session call cannot tell you the
+order was paid. A webhook does. Register an endpoint on the dashboard's **Webhooks** tab,
+subscribe to `payment.succeeded`, and handle it:
+
+```go
+func handleWebhook(w http.ResponseWriter, r *http.Request) {
+	// The RAW bytes, before any decoding. The signature covers exactly these,
+	// so decoding and re-encoding first will break verification.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	event, err := dominaite.VerifyWebhook(
+		body,
+		r.Header.Get(dominaite.WebhookSignatureHeader),
+		os.Getenv("DOMINAITE_WEBHOOK_SECRET"),
+	)
+	if err != nil {
+		// Log the reason for yourself; never tell the caller why it failed.
+		log.Printf("rejected webhook: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	// Delivery is at-least-once, so the same event.ID will sometimes arrive
+	// twice. Dedupe on it, in your database, before doing anything with money.
+	if inserted := recordDelivery(event.ID); !inserted {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if event.Type == dominaite.EventPaymentSucceeded {
+		// Queue the work. Do not fulfil the order on this goroutine.
+		enqueueFulfilment(event.Data.TransactionID, event.Data.IdempotencyKey)
+	}
+
+	// Answer fast. A slow 2xx is counted as a failed delivery and retried.
+	w.WriteHeader(http.StatusOK)
+}
+```
+
+A runnable version, with every event type handled, is in
+`examples/webhook-handler/main.go`:
+
+```bash
+export DOMINAITE_WEBHOOK_SECRET=whsec_...
+go run ./examples/webhook-handler
+```
+
+That is the whole integration: the session call, the script tag, the webhook, and your domain
+bound to your checkout by Dominaite during onboarding.
+
+## Webhooks
+
+`VerifyWebhook` authenticates a delivery and returns the parsed event. It verifies **before**
+it parses, and a `WebhookEvent` cannot be obtained any other way, so an unverified payload
+cannot reach your business logic by accident.
+
+```go
+event, err := dominaite.VerifyWebhook(payload, signatureHeader, secret, opts...)
+```
+
+| Argument | What |
+|---|---|
+| `payload` | The raw request body, byte for byte as received. Not a re-encoded struct. |
+| `signatureHeader` | The `X-Webhook-Signature` value, also available as `dominaite.WebhookSignatureHeader`. |
+| `secret` | The endpoint's `whsec_...` secret. |
+
+Options: `WithWebhookTolerance(d)` changes the freshness window from its 300 second default
+(`dominaite.DefaultWebhookTolerance`), and `WithWebhookClock(fn)` replaces the clock so tests
+can verify a recorded delivery at a fixed instant.
+
+### Getting the raw body right
+
+This is the one thing that reliably goes wrong. The signature covers the exact bytes that were
+sent, so anything that reserialises the body invalidates it. Read the body first, verify, then
+parse. If a framework or middleware has already decoded the body for you, reach for its
+raw-body escape hatch rather than re-marshalling the decoded value.
+
+### The signature scheme
+
+The header is `t={unix_seconds},v1={lowercase_hex}`. `v1` is HMAC-SHA256 over the ASCII
+concatenation `"{t}.{raw_body}"`, keyed with the UTF-8 bytes of the `whsec_` secret. The SDK
+compares in constant time and then checks that `|now - t|` is within tolerance.
+
+The timestamp is checked **after** the MAC, deliberately: `t` is covered by the signature, so
+until the MAC passes there is no reason to trust it. That ordering also means a stale but
+genuine replay reports `TIMESTAMP_OUT_OF_TOLERANCE` while a forgery reports
+`SIGNATURE_MISMATCH`, instead of the two failure modes blurring together.
+
+If deliveries start failing with `TIMESTAMP_OUT_OF_TOLERANCE`, your server clock has drifted.
+Fix NTP rather than widening the tolerance.
+
+### Rejections
+
+Every failure is a `*WebhookVerificationError` with a `Reason`. Nothing else comes out and
+nothing panics, so a hostile header is an ordinary rejection path:
+
+```go
+var verr *dominaite.WebhookVerificationError
+if errors.As(err, &verr) {
+	log.Printf("rejected: %s", verr.Reason)
+	w.WriteHeader(http.StatusBadRequest)
+	return
+}
+```
+
+| `Reason` | Meaning |
+|---|---|
+| `MALFORMED_SIGNATURE` | Header missing, empty, or not `t=...,v1=...`. Nothing could be checked. |
+| `SIGNATURE_MISMATCH` | The MAC did not match. Wrong secret, or the payload is not what was signed. |
+| `TIMESTAMP_OUT_OF_TOLERANCE` | MAC valid, timestamp too old or too far ahead. A replay, or clock drift. |
+| `MALFORMED_PAYLOAD` | Signature good, body not valid JSON. Surprising - log it rather than dropping it. |
+
+Answer a rejected delivery with `400` and no detail. Never echo the reason back: whoever sent
+an unverified request does not get to learn whether the secret or the timestamp was the problem.
+
+### The event
+
+The envelope is flat. There is no `ApiResponse` wrapper and no `success` field, so do not
+branch on one.
+
+```go
+event.ID                     // delivery id, and YOUR DEDUPE KEY
+event.Type                   // one of the Event* constants
+event.CreatedAt              // ISO 8601 UTC instant of the transition, not of delivery
+event.Data.TransactionID
+event.Data.Status            // wire status, one of the Status* constants
+event.Data.PreviousStatus    // empty when the wire sent null
+event.Data.Amount            // MINOR units: what you are PAID
+event.Data.GrossAmount       // MINOR units: what the card was charged
+event.Data.SurchargeAmount   // *int64, nil when no surcharge is known
+event.Data.Currency
+event.Data.OriginalTransactionID  // parent, on refunds and reversals
+event.Data.IdempotencyKey    // your own mint key, when the gateway knows it
+event.Raw                    // the verified bytes, for anything not modelled above
+```
+
+`Amount` and `GrossAmount` are not the same number when a surcharge applies: `Amount` is what
+you are paid, `GrossAmount` is what moved on the card. Credit orders from `Amount`.
+
+`SurchargeAmount` is a pointer so that "no surcharge information" stays distinct from "a
+surcharge of zero".
+
+`IdempotencyKey` is the cheapest way to match a delivery back to your own order without a
+lookup. It is empty when the gateway does not know it, which today includes every refund.
+
+### Event catalog
+
+`payment.succeeded`, `payment.failed`, `payment.requires_capture`, `payment.cancelled`,
+`payment.abandoned`, `payment.refunded`, `payment.disputed` (exported as the `Event*`
+constants). The set is closed and case-sensitive; endpoint registration rejects anything else.
+
+- `payment.succeeded` is the **only** signal that means money is in hand.
+- `payment.refunded` fires once per refund, from the refund row - never from the parent
+  payment's status flip.
+- `payment.requires_capture` includes approved pre-auth holds. It is not an unpaid order.
+- `payment.cancelled` is a pre-completion void only.
+- `payment.abandoned` is the terminal sweep verdict on a checkout that was never paid.
+
+`pending` and `processing` are deliberately not webhooked. Poll session status if you want to
+drive in-flight UX off them.
+
+Treat a `Type` you do not recognise as a no-op and still answer `2xx`. The catalog can grow,
+and a 400 on an unknown type will trip the circuit breaker on your endpoint.
+
+### Delivery semantics
+
+Delivery is **at-least-once**. Dedupe on `event.ID`, persistently - an in-memory set loses on
+restart, and retries can arrive hours apart.
+
+Respond `2xx` quickly and queue the real work. A slow response counts as a failed delivery.
+
+Failed deliveries are retried up to the endpoint's `RetryCount` (default 3, max 10, 0 disables)
+at 1m, 5m, 30m, 2h, 12h. An endpoint whose initial attempt and every configured retry fail
+consecutively is auto-disabled; a later successful delivery re-enables it. An endpoint you
+disabled by hand in the dashboard is never re-enabled automatically.
+
+A merchant can have at most 25 active endpoints.
+
+### Reconciliation is still mandatory
+
+Webhooks complement the reconciliation sweep, they do not replace it. There is no publish
+outbox, and chains parked against a disabled endpoint are simply lost, so there are windows in
+which a delivery never arrives at all. Keep a scheduled job that reads back the status of every
+order you believe is still open and settles it from the API.
+
+If you do only one of the two, do reconciliation. It is the one that cannot silently lose money.
+
+### Rotating a secret
+
+Regenerating an endpoint's secret replaces it: the old secret stops verifying immediately.
+`VerifyWebhook` accepts multiple `v1` elements in one header, so an overlapping rotation works
+if the sender ever emits one, but do not count on an overlap window today. Update the secret in
+your configuration as part of the same change that regenerates it.
+
+### Testing your handler
+
+The suite in this repo pins the canonical cross-SDK vector, byte for byte, along with tamper,
+wrong-secret, stale-timestamp and malformed-header cases. Every Dominaite SDK pins the same
+vector, so the recipe cannot drift between languages. Run `go test ./...` before you point a
+real endpoint at your handler.
+
+To test your own handler against a fixed delivery, sign a body yourself and pin the clock:
+
+```go
+event, err := dominaite.VerifyWebhook(
+	body,
+	header,
+	secret,
+	dominaite.WithWebhookClock(func() time.Time { return time.Unix(1755700000, 0) }),
+)
 ```
 
 ## Client options
@@ -226,7 +450,15 @@ The delay doubles each attempt, and a cancelled context stops the wait immediate
 
 A session is valid for 2 hours. If the payer comes back later, create a new session.
 
-## Status polling
+## Status polling (fallback, and the reconciliation sweep)
+
+**Prefer webhooks for learning that a payment resolved.** Polling is the right tool for three
+narrower jobs: the reconciliation sweep, in-flight UX on `pending` and `processing` (which are
+never webhooked), and local development before you have a public URL to deliver to.
+
+Reaching for polling as your primary signal means holding an order open until you happen to ask
+about it. Reaching for it as your *only* signal means a busy loop against a rate-limited
+endpoint. Use both: webhooks for latency, the sweep for completeness.
 
 ```go
 status, err := client.GetStatus(ctx, session.TransactionID)
@@ -274,6 +506,7 @@ For the specific kind, use `errors.As` with the concrete pointer type:
 | `*TransportError` | Network failure, timeout, or 5xx (`MERCHANT_API_UNAVAILABLE`). Wraps the cause, reachable with `errors.Unwrap`. | Retry with the **same** idempotency key. |
 | `*APIError` | Any other rejecting or unexpected response; `HTTPStatus` carries the code. | Inspect. A 422 means an idempotency key was replayed with a different body - use a fresh key. |
 | `*ValidationError` | Bad arguments (non-positive amount, missing field, malformed key id). | Fix the call; nothing was sent. |
+| `*WebhookVerificationError` | `VerifyWebhook` rejected an inbound delivery; `Reason` carries which check failed. | Answer 400 with no detail. See [Webhooks](#rejections). |
 
 Refusal codes on `RefusalError.ErrorCode`:
 
