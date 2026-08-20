@@ -237,6 +237,112 @@ func TestGetStatusSignsEmptyKeyAndEmptyBody(t *testing.T) {
 	}
 }
 
+func TestReplayRefusalCarriesTheTransactionID(t *testing.T) {
+	// Without this the documented recovery - read it back with GetStatus - is
+	// unreachable from the error, leaving a second payment as the only option.
+	server, _ := newTestServer(t, reply{Body: map[string]any{
+		"success":       false,
+		"transactionId": testCheckout["transactionId"],
+		"errorCode":     "DUPLICATE_REQUEST",
+		"errorMessage":  "A checkout session for this idempotency key is already open.",
+	}})
+	client := newTestClient(t, server.URL)
+
+	_, err := client.CreateCheckoutSession(context.Background(), testParams())
+	var refusal *RefusalError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("got %v, want *RefusalError", err)
+	}
+	if refusal.ErrorCode != "DUPLICATE_REQUEST" {
+		t.Fatalf("ErrorCode = %s, want DUPLICATE_REQUEST", refusal.ErrorCode)
+	}
+	if refusal.TransactionID != testCheckout["transactionId"].(string) {
+		t.Fatalf("TransactionID = %q, want %q", refusal.TransactionID, testCheckout["transactionId"])
+	}
+	if !strings.Contains(string(refusal.Raw), "DUPLICATE_REQUEST") {
+		t.Fatalf("Raw did not carry the payload: %s", refusal.Raw)
+	}
+}
+
+func TestRefusalWithoutATransactionIDLeavesItEmpty(t *testing.T) {
+	// The concurrent-race DUPLICATE_REQUEST knows the key is taken, not by which row.
+	server, _ := newTestServer(t, reply{Body: map[string]any{
+		"success":   false,
+		"errorCode": "DUPLICATE_REQUEST",
+	}})
+	client := newTestClient(t, server.URL)
+
+	_, err := client.CreateCheckoutSession(context.Background(), testParams())
+	var refusal *RefusalError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("got %v, want *RefusalError", err)
+	}
+	if refusal.TransactionID != "" {
+		t.Fatalf("TransactionID = %q, want empty", refusal.TransactionID)
+	}
+}
+
+func TestPingSignsEmptyKeyAndEmptyBodyOnTheCanonicalPath(t *testing.T) {
+	// The gateway envelope: the ping read is FLAT inside data, with no inner
+	// success and no wrapper object.
+	pong := map[string]any{
+		"success": true,
+		"data": map[string]any{
+			"pong":             true,
+			"merchantId":       "mer_1",
+			"serverTime":       "2026-08-20T12:00:00Z",
+			"serverUnixTime":   1755691200,
+			"clockSkewSeconds": 2,
+		},
+	}
+	server, calls := newTestServer(t, reply{Body: pong})
+	client := newTestClient(t, server.URL)
+
+	got, err := client.Ping(context.Background())
+	if err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	if !got.Pong || got.MerchantID != "mer_1" || got.ClockSkewSeconds != 2 {
+		t.Fatalf("unexpected ping: %+v", got)
+	}
+
+	call := calls()[0]
+	if call.Method != http.MethodGet || call.Path != PingPath {
+		t.Fatalf("got %s %s, want GET %s", call.Method, call.Path, PingPath)
+	}
+	if call.Body != "" {
+		t.Fatalf("GET sent a body: %q", call.Body)
+	}
+	if _, present := call.Header["Idempotency-Key"]; present {
+		t.Fatal("GET must not send an Idempotency-Key header")
+	}
+
+	// The signed path is the canonical path only, never the base URL's own prefix.
+	want := Sign(SignInput{
+		Secret:    vector.Secret,
+		Timestamp: call.Header.Get("X-Timestamp"),
+		Method:    http.MethodGet,
+		Path:      PingPath,
+	})
+	if got := call.Header.Get("X-Signature"); got != want {
+		t.Fatalf("X-Signature = %s, want %s", got, want)
+	}
+}
+
+func TestPingAuthFailureKeepsTheErrorTaxonomy(t *testing.T) {
+	server, _ := newTestServer(t, reply{Status: http.StatusUnauthorized, Body: map[string]any{"errorCode": "IP_NOT_ALLOWED"}})
+	client := newTestClient(t, server.URL)
+
+	_, err := client.Ping(context.Background())
+	var authErr *AuthError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("got %v, want *AuthError", err)
+	}
+	if authErr.ErrorCode != "IP_NOT_ALLOWED" {
+		t.Fatalf("ErrorCode = %s, want IP_NOT_ALLOWED", authErr.ErrorCode)
+	}
+}
+
 func TestGetStatusRejectsNonUUID(t *testing.T) {
 	server, calls := newTestServer(t, reply{Body: map[string]any{}})
 	client := newTestClient(t, server.URL)

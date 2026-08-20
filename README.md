@@ -70,6 +70,29 @@ export DOMINAITE_BASE_URL=https://func-dom-gw-payments-dev-gwc-01.azurewebsites.
 # https://api.dominaite.com/payments
 ```
 
+Ping before your first mint. It is one signed GET that creates nothing, so anything that
+fails here is your credentials, your signing or your clock:
+
+```go
+client, err := dominaite.New(
+	os.Getenv("DOMINAITE_KEY_ID"),
+	os.Getenv("DOMINAITE_SECRET"),
+	dominaite.WithBaseURL(os.Getenv("DOMINAITE_BASE_URL")), // no-op in production
+)
+if err != nil {
+	log.Fatal(err)
+}
+
+ping, err := client.Ping(context.Background())
+if err != nil {
+	log.Fatal(err)
+}
+log.Printf("merchant %s, clock skew %ds", ping.MerchantID, ping.ClockSkewSeconds)
+```
+
+Watch `ClockSkewSeconds`: the gateway rejects requests once it passes 300, so a number that
+keeps growing is your cue to fix NTP before payments start failing.
+
 `main.go`:
 
 ```go
@@ -212,10 +235,19 @@ status, err := client.GetStatus(ctx, session.TransactionID)
 ```
 
 `Status` is one of `pending`, `processing`, `succeeded`, `failed`, `refunded`,
-`partially_refunded`, `cancelled`, `disputed`, `abandoned` (exported as the `Status*`
-constants). While the session is still payable the response also carries `ExpiresAt`; after
-that instant a `pending` session can only become `abandoned`. An unknown transaction id returns
-an `*APIError` with `HTTPStatus` 404.
+`partially_refunded`, `cancelled`, `disputed`, `requires_capture`, `abandoned` (exported as the
+`Status*` constants). While the session is still payable the response also carries `ExpiresAt`;
+after that instant a `pending` session can only become `abandoned`. An unknown transaction id
+returns an `*APIError` with `HTTPStatus` 404.
+
+`succeeded` is the only value that means the payment is complete. Keep polling on `pending`,
+`processing` and `requires_capture` - none of them is terminal.
+
+`requires_capture` is **not** "unpaid": the payer has already paid and the funds are held
+awaiting capture. Never treat it as an abandoned order.
+
+Treat any status you do not recognise as still-open as well: a value the API adds later should
+make you keep polling, never silently close an order that is still live.
 
 Poll after the payer returns to you, or on your order timeout - not in a tight loop; the
 endpoint is rate limited per key.
@@ -248,7 +280,27 @@ Refusal codes on `RefusalError.ErrorCode`:
 - `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; retry later.
 - `DUPLICATE_REQUEST` - a session for this idempotency key is already open.
 - `ALREADY_PROCESSED` - this idempotency key's payment already completed.
+- `PRIOR_ATTEMPT_FAILED` - a prior attempt with this key failed terminally; use a fresh key.
 - `IDEMPOTENCY_KEY_REUSED` - same key sent with a different body; use a fresh key.
+
+### Recovering from a replay refusal
+
+When your idempotency key collides with an earlier attempt, the refusal names the transaction it
+collided with, so you can reconcile instead of minting a second payment:
+
+```go
+session, err := client.CreateCheckoutSession(ctx, params)
+
+var refusal *dominaite.RefusalError
+if errors.As(err, &refusal) && refusal.TransactionID != "" {
+	status, err := client.GetStatus(ctx, refusal.TransactionID)
+	// Now you know what the earlier attempt actually did.
+}
+```
+
+`RefusalError.TransactionID` is empty when the API did not name one (a concurrent-race
+`DUPLICATE_REQUEST` knows the key is taken but not yet by which row), so check it before use.
+The full refusal payload is on `RefusalError.Raw`.
 
 ## Verifying your signing
 

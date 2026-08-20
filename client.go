@@ -45,8 +45,11 @@ const (
 	// session; GET SessionsPath + "/{transactionId}" reads its status.
 	SessionsPath = "/merchant-api/checkout/sessions"
 
+	// PingPath is the credentials-and-clock smoke test. It creates nothing.
+	PingPath = "/merchant-api/ping"
+
 	// Version is this SDK's version, reported in the User-Agent.
-	Version = "0.1.0"
+	Version = "0.1.2"
 
 	defaultTimeout = 45 * time.Second // serverless cold starts hit 10+s on dev; 15s was a coin flip
 )
@@ -136,6 +139,33 @@ func New(keyID, secret string, opts ...Option) (*Client, error) {
 	return client, nil
 }
 
+// Ping verifies your credentials, your signing and your clock without creating
+// anything. Make this your first live call: it isolates the setup problems from
+// the payment ones, so a failure here is the key id, the secret, the signature,
+// the clock or an IP allowlist and nothing else.
+//
+// Check Ping.ClockSkewSeconds. Requests start failing at 300.
+//
+// Errors it returns:
+//   - *AuthError: wrong credentials, bad signature, clock off, IP not allowlisted.
+//   - *APIError: an unexpected or rejecting response; inspect HTTPStatus.
+//   - *TransportError: network failure or 5xx.
+func (c *Client) Ping(ctx context.Context) (*Ping, error) {
+	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
+	// Idempotency-Key header.
+	payload, err := c.request(ctx, http.MethodGet, PingPath, "", "")
+	if err != nil {
+		return nil, err
+	}
+
+	ping := &Ping{Raw: payload}
+	if err := json.Unmarshal(payload, ping); err != nil {
+		return nil, newAPIError(http.StatusOK, "The API returned an unexpected ping response")
+	}
+
+	return ping, nil
+}
+
 // CreateCheckoutSession opens a hosted checkout session for one payment.
 //
 // Errors it returns:
@@ -158,10 +188,11 @@ func (c *Client) CreateCheckoutSession(ctx context.Context, params CreateCheckou
 	}
 
 	var envelope struct {
-		Success      *bool           `json:"success"`
-		Checkout     json.RawMessage `json:"checkout"`
-		ErrorCode    string          `json:"errorCode"`
-		ErrorMessage string          `json:"errorMessage"`
+		Success       *bool           `json:"success"`
+		Checkout      json.RawMessage `json:"checkout"`
+		TransactionID string          `json:"transactionId"`
+		ErrorCode     string          `json:"errorCode"`
+		ErrorMessage  string          `json:"errorMessage"`
 	}
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return nil, newAPIError(http.StatusOK, "The API returned an unexpected create-session response")
@@ -176,7 +207,13 @@ func (c *Client) CreateCheckoutSession(ctx context.Context, params CreateCheckou
 		if message == "" {
 			message = "The checkout session was refused."
 		}
-		return nil, newRefusalError(code, message)
+		// A replay refusal names the transaction the key collided with. Carry it
+		// (and the whole payload) so the caller can reconcile with GetStatus
+		// instead of minting a second payment for the same order.
+		refusal := newRefusalError(code, message)
+		refusal.TransactionID = envelope.TransactionID
+		refusal.Raw = payload
+		return nil, refusal
 	}
 
 	session := &CheckoutSession{Raw: envelope.Checkout}
@@ -270,10 +307,21 @@ func (c *Client) CreateCheckoutSessionWithRetry(ctx context.Context, params Crea
 
 // GetStatus reads the payment status of one of your checkout sessions.
 //
-// Status is one of the Status* constants. While a session is still payable the
-// response also carries ExpiresAt; after that instant a pending session can only
-// become abandoned. Amounts are integers in MINOR units. An unknown transaction
-// id returns an *APIError with HTTPStatus 404.
+// Status is one of the Status* constants: pending, processing, succeeded, failed,
+// refunded, partially_refunded, cancelled, disputed, requires_capture, abandoned.
+// While a session is still payable the response also carries ExpiresAt; after that
+// instant a pending session can only become abandoned. Amounts are integers in
+// MINOR units. An unknown transaction id returns an *APIError with HTTPStatus 404.
+//
+// StatusSucceeded is the only value that means the payment is complete. Keep polling
+// on StatusPending, StatusProcessing and StatusRequiresCapture - none of them is
+// terminal.
+//
+// StatusRequiresCapture is NOT "unpaid": the payer has already paid and the funds are
+// held awaiting capture. Never treat it as an abandoned order.
+//
+// Treat any status you do not recognise as still-open too: a value the API adds later
+// should make you keep polling, never silently close a live order.
 //
 // Poll after the payer returns to you, or on your order timeout. Not in a tight
 // loop: the endpoint is rate limited per key.

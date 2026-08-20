@@ -109,6 +109,25 @@ type CheckoutSession struct {
 	Raw json.RawMessage `json:"-"`
 }
 
+// Ping is what Ping returns: proof that your key, secret, signing and clock are
+// all good, without creating anything.
+type Ping struct {
+	// Pong is always true on a 200.
+	Pong bool `json:"pong"`
+	// MerchantID is the merchant your key authenticated as.
+	MerchantID string `json:"merchantId"`
+	// ServerTime is ISO 8601.
+	ServerTime string `json:"serverTime,omitempty"`
+	// ServerUnixTime is the server clock in unix seconds.
+	ServerUnixTime int64 `json:"serverUnixTime,omitempty"`
+	// ClockSkewSeconds is server time minus your X-Timestamp. If its absolute
+	// value creeps toward 300, fix NTP now - requests start failing at 300.
+	ClockSkewSeconds int64 `json:"clockSkewSeconds"`
+
+	// Raw is the unparsed payload, for fields this struct does not model yet.
+	Raw json.RawMessage `json:"-"`
+}
+
 // Transaction status values returned by GetStatus.
 const (
 	StatusPending           = "pending"
@@ -119,6 +138,7 @@ const (
 	StatusPartiallyRefunded = "partially_refunded"
 	StatusCancelled         = "cancelled"
 	StatusDisputed          = "disputed"
+	StatusRequiresCapture   = "requires_capture"
 	StatusAbandoned         = "abandoned"
 )
 

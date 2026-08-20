@@ -1,6 +1,9 @@
 package dominaite
 
-import "errors"
+import (
+	"encoding/json"
+	"errors"
+)
 
 // ErrDominaite matches every error this SDK returns, for a single errors.Is
 // catch-all:
@@ -41,12 +44,33 @@ func (e baseError) Is(target error) bool { return target == ErrDominaite }
 //   - PAYMENT_PROCESSING_UNAVAILABLE: card payments are off right now; retry later.
 //   - DUPLICATE_REQUEST: a session for this idempotency key is already open.
 //   - ALREADY_PROCESSED: this idempotency key's payment already completed.
+//   - PRIOR_ATTEMPT_FAILED: a prior attempt with this key failed terminally; use a fresh key.
 //   - IDEMPOTENCY_KEY_REUSED: same key sent with a DIFFERENT body; use a fresh key.
+//
+// On a replay refusal the API also names WHICH payment your key collided with, on
+// TransactionID. That is the recovery path - read it back with GetStatus to find out
+// what the earlier attempt did, instead of minting a second payment for the same
+// order:
+//
+//	session, err := client.CreateCheckoutSession(ctx, params)
+//	var refusal *dominaite.RefusalError
+//	if errors.As(err, &refusal) && refusal.TransactionID != "" {
+//		status, err := client.GetStatus(ctx, refusal.TransactionID)
+//	}
+//
+// TransactionID is empty when the API did not name one - notably the concurrent-race
+// DUPLICATE_REQUEST, which knows a key was taken but not yet by which row. Always
+// check before using it.
 //
 // Never blind-retry a refusal. It will not change on its own.
 type RefusalError struct {
 	baseError
 	ErrorCode string
+	// TransactionID is the payment this idempotency key collided with, when the
+	// API named one. Empty otherwise.
+	TransactionID string
+	// Raw is the unparsed refusal payload, for fields not modelled above.
+	Raw json.RawMessage
 }
 
 // AuthError means the API rejected your credentials or signature (HTTP 401/403).
