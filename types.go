@@ -161,3 +161,79 @@ type CheckoutStatus struct {
 	// Raw is the unparsed payload, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
 }
+
+// Webhook event types. This is the complete v1 catalog - endpoint registration
+// rejects anything outside it, and the match is case-sensitive.
+//
+// EventPaymentSucceeded is the ONLY signal that means money is in hand. The
+// in-flight states (pending, processing) are deliberately not webhooked; poll
+// GetStatus if you want to drive UX off them.
+const (
+	EventPaymentSucceeded       = "payment.succeeded"
+	EventPaymentFailed          = "payment.failed"
+	EventPaymentRequiresCapture = "payment.requires_capture"
+	EventPaymentCancelled       = "payment.cancelled"
+	EventPaymentAbandoned       = "payment.abandoned"
+	EventPaymentRefunded        = "payment.refunded"
+	EventPaymentDisputed        = "payment.disputed"
+)
+
+// WebhookEvent is one verified webhook delivery. VerifyWebhook returns it; there
+// is no other way to get one, which is the point - the signature is checked
+// before the body is parsed.
+//
+// The envelope is FLAT. There is no ApiResponse wrapper and no `success` field,
+// so do not branch on one.
+type WebhookEvent struct {
+	// ID is the delivery id and YOUR DEDUPE KEY. Delivery is at-least-once, so
+	// the same ID can arrive more than once and you must ignore the repeats.
+	ID string `json:"id"`
+	// Type is one of the Event* constants. Treat an unrecognised type as a
+	// no-op rather than an error; the catalog can grow.
+	Type string `json:"type"`
+	// CreatedAt is the ISO 8601 UTC instant of the transition, not of delivery.
+	// On a retry it still carries the original transition time.
+	CreatedAt string      `json:"createdAt"`
+	Data      WebhookData `json:"data"`
+
+	// Raw is the exact verified payload, byte for byte as signed. Use it for
+	// fields this struct does not model yet, or to store the delivery verbatim.
+	Raw json.RawMessage `json:"-"`
+}
+
+// WebhookData is the payload of a WebhookEvent.
+type WebhookData struct {
+	TransactionID string `json:"transactionId"`
+	// Status is the wire status of the row, one of the Status* constants.
+	Status string `json:"status"`
+	// PreviousStatus is the status the row moved from. Nullable on the wire;
+	// empty string when absent.
+	PreviousStatus string `json:"previousStatus"`
+	// Kind is the movement kind, e.g. "sale". Nullable on the wire; empty
+	// string when absent.
+	Kind string `json:"kind"`
+
+	// Amount is in MINOR units. For payment.* it is what the merchant is PAID
+	// (the base amount). For payment.refunded it is what was returned to the
+	// customer. It is NOT the card movement - that is GrossAmount.
+	Amount int64 `json:"amount"`
+	// GrossAmount is the card movement in MINOR units: what the customer's card
+	// was actually charged.
+	GrossAmount int64 `json:"grossAmount"`
+	// SurchargeAmount is in MINOR units and nil when no surcharge is known.
+	// A pointer, so "no surcharge information" stays distinct from "zero".
+	SurchargeAmount *int64 `json:"surchargeAmount"`
+	// Currency is ISO 4217.
+	Currency string `json:"currency"`
+
+	// OriginalTransactionID is the parent transaction for refunds and
+	// reversals. Empty on an original payment.
+	OriginalTransactionID string `json:"originalTransactionId"`
+	// IdempotencyKey is your own mint key when the gateway knows it - the
+	// cheapest way to match a delivery back to your order without a lookup.
+	// Empty when unknown, which today includes every refund.
+	IdempotencyKey string `json:"idempotencyKey"`
+
+	// Raw is the unparsed data object, for fields not modelled above.
+	Raw json.RawMessage `json:"-"`
+}

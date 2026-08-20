@@ -133,3 +133,47 @@ func newTransportError(message string, cause error) *TransportError {
 func newValidationError(message string) *ValidationError {
 	return &ValidationError{baseError: baseError{Message: message}}
 }
+
+// Reasons reported on WebhookVerificationError.Reason.
+const (
+	// WebhookReasonMalformedSignature means the signature header was missing,
+	// empty, or not in the "t=...,v1=..." shape (no t, no v1, or a v1 that is
+	// not hex). Nothing could be checked.
+	WebhookReasonMalformedSignature = "MALFORMED_SIGNATURE"
+	// WebhookReasonSignatureMismatch means the MAC did not match. Either the
+	// secret is wrong or the payload is not the bytes that were signed. Treat
+	// the request as hostile.
+	WebhookReasonSignatureMismatch = "SIGNATURE_MISMATCH"
+	// WebhookReasonTimestampOutOfTolerance means the MAC was valid but the
+	// timestamp is too far from now: a replay of a genuine old delivery, or
+	// your server clock has drifted. Check NTP before widening the tolerance.
+	WebhookReasonTimestampOutOfTolerance = "TIMESTAMP_OUT_OF_TOLERANCE"
+	// WebhookReasonMalformedPayload means the signature was good but the body
+	// was not valid JSON. Surprising - the bytes are authentic - so log it
+	// rather than silently dropping it.
+	WebhookReasonMalformedPayload = "MALFORMED_PAYLOAD"
+)
+
+// WebhookVerificationError means VerifyWebhook rejected a delivery. Nothing was
+// parsed and nothing should be acted on.
+//
+// Answer the HTTP request with 400 and no detail. Never echo the reason back to
+// the caller: whoever sent an unverified request does not get to learn whether
+// their secret or their timestamp was the problem.
+//
+//	event, err := dominaite.VerifyWebhook(body, r.Header.Get("X-Webhook-Signature"), secret)
+//	var verr *dominaite.WebhookVerificationError
+//	if errors.As(err, &verr) {
+//		log.Printf("rejected webhook: %s", verr.Reason) // your logs only
+//		w.WriteHeader(http.StatusBadRequest)
+//		return
+//	}
+type WebhookVerificationError struct {
+	baseError
+	// Reason is one of the WebhookReason* constants.
+	Reason string
+}
+
+func newWebhookVerificationError(reason, message string) *WebhookVerificationError {
+	return &WebhookVerificationError{baseError: baseError{Message: message}, Reason: reason}
+}
