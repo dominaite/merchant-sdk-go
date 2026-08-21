@@ -556,13 +556,13 @@ If you ever hand-roll the signing (or debug an `INVALID_SIGNATURE`), `Sign` is e
 ```go
 dominaite.Sign(dominaite.SignInput{
 	Secret:         "dms_...",
-	Timestamp:      "1755302400",                                 // unix SECONDS
+	Timestamp:      "1755302400",                           // unix SECONDS
 	Method:         "POST",
-	Path:           "/merchant-api/checkout/sessions",  // path only, no host
-	IdempotencyKey: "00000000-0000-4000-8000-000000000001",        // "" for GET
+	Path:           "/merchant-api/checkout/sessions",      // path only, no host
+	IdempotencyKey: "00000000-0000-4000-8000-000000000001", // "" for GET
 	Body:           `{"amount":2500,"currency":"EUR","orderReference":"order-1042"}`, // "" for GET
 })
-// "95759958a0a0a9bd3e6e37101c01e8e7fee1166406e4ac2ff488764f5f742cbf"
+// "8f5fba0b29a8eea81b76a0e6d7119e79ec68f586910f77713b045652e5ce9b74"
 ```
 
 Printing a `SignInput` or a `Client` **itself** is safe: both redact the secret under `%v`,
