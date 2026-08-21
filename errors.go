@@ -85,11 +85,14 @@ type AuthError struct {
 }
 
 // APIError means the API answered, but with an unexpected or rejecting response.
-// HTTPStatus carries the code. A 422 means an idempotency key was replayed with
-// a different body; use a fresh key. A 404 from GetStatus means an unknown
+// HTTPStatus carries the code. A 404 from GetStatus means an unknown
 // transaction id. A 3xx means something in front of the API answered with a
 // redirect: the SDK never follows one and never treats its body as a real
 // response, because the API itself does not redirect.
+//
+// A key replayed with a different body does NOT arrive here. The API answers
+// HTTP 200 with success false and IDEMPOTENCY_KEY_REUSED, so it reaches you as
+// a *RefusalError.
 //
 // ErrorCode is the machine-readable code when the API sent one, so input
 // rejections can be branched on rather than string-matched. A 400 carrying
