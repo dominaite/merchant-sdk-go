@@ -431,6 +431,12 @@ Every `CreateCheckoutSession` call carries an idempotency key (auto-generated, o
 in `IdempotencyKey`). Retrying with the same key never opens a second payment - on a timeout,
 retry with the same key rather than generating a new one.
 
+What a retry does **not** do is hand back the session the first attempt created. If that attempt
+landed, the retry comes back as a `*RefusalError` with a replay code (`DUPLICATE_REQUEST`,
+`ALREADY_PROCESSED`, `PRIOR_ATTEMPT_FAILED`, `IDEMPOTENCY_KEY_REUSED`) and no cashier fields.
+Recover through `RefusalError.TransactionID` and `GetStatus` - see
+[Recovering from a replay refusal](#recovering-from-a-replay-refusal) below.
+
 `CreateCheckoutSessionWithRetry` does that for you: it pins one key up front and reuses it
 across attempts, retrying only `*TransportError` (network failures and 5xx, including
 `MERCHANT_API_UNAVAILABLE`). Refusals and authentication failures are not retried - they will

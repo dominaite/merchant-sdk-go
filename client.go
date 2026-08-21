@@ -286,10 +286,16 @@ func (o RetryOptions) withDefaults() (int, time.Duration, error) {
 // only, with THE SAME idempotency key across every attempt.
 //
 // Reusing the key is what makes the retry safe. A transport failure leaves you
-// not knowing whether the request landed; the API returns the original session
-// for a key it has already seen instead of opening a second one. Generating a
-// fresh key per attempt would be exactly the double-charge bug this method
-// exists to prevent, so the key is pinned once before the first attempt.
+// not knowing whether the request landed; a key the API has already seen is
+// refused instead of opening a second session. Generating a fresh key per
+// attempt would be exactly the double-charge bug this method exists to
+// prevent, so the key is pinned once before the first attempt.
+//
+// A retry after the first attempt DID land does not give you that session
+// back. The API answers with a replay refusal (*RefusalError, ErrorCode
+// DUPLICATE_REQUEST, ALREADY_PROCESSED, PRIOR_ATTEMPT_FAILED or
+// IDEMPOTENCY_KEY_REUSED) and no cashier fields. Recover through
+// RefusalError.TransactionID with GetStatus when the API named one.
 //
 // Refusals and authentication failures are returned immediately. They will not
 // change on a retry.
