@@ -158,6 +158,11 @@ const (
 	// was not valid JSON. Surprising - the bytes are authentic - so log it
 	// rather than silently dropping it.
 	WebhookReasonMalformedPayload = "MALFORMED_PAYLOAD"
+	// WebhookReasonInvalidTolerance means the caller passed a negative
+	// tolerance to WithWebhookTolerance. That is your bug, not the sender's:
+	// nothing about the delivery was checked. Use 0 to require an exact
+	// timestamp, or a positive window.
+	WebhookReasonInvalidTolerance = "INVALID_TOLERANCE"
 )
 
 // WebhookVerificationError means VerifyWebhook rejected a delivery. Nothing was

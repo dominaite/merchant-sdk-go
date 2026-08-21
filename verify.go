@@ -31,9 +31,15 @@ type verifyConfig struct {
 // WithWebhookTolerance overrides how far the delivery timestamp may sit from
 // your clock. Defaults to DefaultWebhookTolerance (5 minutes).
 //
-// A zero or negative duration DISABLES the freshness check, which leaves you
-// open to replay of any delivery ever captured. If you are reaching for it
-// because deliveries keep failing, your server clock is wrong - fix NTP.
+// Zero is the strictest setting, not an off switch: it requires the timestamp
+// to equal your clock to the second, which in practice rejects everything that
+// spent any time in flight. There is no way to disable the freshness check,
+// because doing so accepts a replay of any delivery ever captured. A negative
+// duration is refused outright - VerifyWebhook returns
+// WebhookReasonInvalidTolerance without checking anything.
+//
+// If you are reaching for this because deliveries keep failing, your server
+// clock is wrong. Fix NTP rather than widening the window.
 func WithWebhookTolerance(tolerance time.Duration) VerifyOption {
 	return func(c *verifyConfig) { c.tolerance = tolerance }
 }
@@ -87,6 +93,16 @@ func VerifyWebhook(payload []byte, signatureHeader, secret string, opts ...Verif
 		opt(&cfg)
 	}
 
+	// A negative window is a caller mistake, not a delivery to judge: refuse
+	// before touching the header so it cannot be mistaken for a rejection the
+	// sender caused.
+	if cfg.tolerance < 0 {
+		return nil, newWebhookVerificationError(
+			WebhookReasonInvalidTolerance,
+			"Webhook tolerance must not be negative - pass 0 to require an exact timestamp, or a positive window.",
+		)
+	}
+
 	if secret == "" {
 		return nil, newWebhookVerificationError(
 			WebhookReasonMalformedSignature,
@@ -118,24 +134,26 @@ func VerifyWebhook(payload []byte, signatureHeader, secret string, opts ...Verif
 	// Only now is the timestamp trustworthy: it is covered by the MAC, so an
 	// attacker cannot move it. Checking freshness after the MAC also keeps a
 	// stale-but-authentic replay distinguishable from a forgery.
-	if cfg.tolerance > 0 {
-		seconds, convErr := strconv.ParseInt(timestamp, 10, 64)
-		if convErr != nil {
-			return nil, newWebhookVerificationError(
-				WebhookReasonMalformedSignature,
-				"Webhook signature timestamp is not an integer.",
-			)
-		}
-		drift := cfg.now().Sub(time.Unix(seconds, 0))
-		if drift < 0 {
-			drift = -drift
-		}
-		if drift > cfg.tolerance {
-			return nil, newWebhookVerificationError(
-				WebhookReasonTimestampOutOfTolerance,
-				"Webhook timestamp is outside the tolerance window - a replay, or your server clock has drifted.",
-			)
-		}
+	staleTimestamp := func() error {
+		return newWebhookVerificationError(
+			WebhookReasonTimestampOutOfTolerance,
+			"Webhook timestamp is outside the tolerance window - a replay, or your server clock has drifted.",
+		)
+	}
+
+	// The grammar guarantees digits, so the only way this fails is a value too
+	// large for int64. That is an instant tens of billions of years out, which
+	// is out of tolerance under any window a caller could set.
+	seconds, convErr := strconv.ParseInt(timestamp, 10, 64)
+	if convErr != nil {
+		return nil, staleTimestamp()
+	}
+	drift := cfg.now().Sub(time.Unix(seconds, 0))
+	if drift < 0 {
+		drift = -drift
+	}
+	if drift > cfg.tolerance {
+		return nil, staleTimestamp()
 	}
 
 	event := &WebhookEvent{}

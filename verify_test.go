@@ -207,11 +207,10 @@ func TestVerifyWebhookToleranceIsConfigurable(t *testing.T) {
 		t.Errorf("widened tolerance should accept: %v", err)
 	}
 
-	// A non-positive tolerance disables the freshness check entirely. This is
-	// documented and deliberate, so it is pinned rather than left to drift.
-	if _, err := VerifyWebhook([]byte(webhookVector.Body), webhookVector.Header, webhookVector.Secret, late, WithWebhookTolerance(0)); err != nil {
-		t.Errorf("zero tolerance should disable the check: %v", err)
-	}
+	// Zero is the strictest window, not an off switch. See
+	// TestVerifyWebhookZeroToleranceRequiresExactTimestamp for the full pinning.
+	_, err = VerifyWebhook([]byte(webhookVector.Body), webhookVector.Header, webhookVector.Secret, late, WithWebhookTolerance(0))
+	assertReason(t, err, WebhookReasonTimestampOutOfTolerance)
 
 	if DefaultWebhookTolerance != 300*time.Second {
 		t.Errorf("DefaultWebhookTolerance = %v, want 300s per the wire contract", DefaultWebhookTolerance)
