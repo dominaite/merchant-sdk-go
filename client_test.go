@@ -450,11 +450,15 @@ func TestAuthErrorFromEnvelopeErrorCode(t *testing.T) {
 	}
 }
 
-func TestIdempotencyKeyReuseIsAnAPIError(t *testing.T) {
-	server, _ := newTestServer(t, reply{Status: 422, Body: map[string]any{
+// A rejecting 4xx must carry its machine-readable code through, so callers
+// branch on the code instead of matching the message text. Idempotency-key
+// replays are NOT this shape - they are HTTP 200 refusals, pinned by
+// TestSessionRefusalErrorCodesAreRecognized.
+func TestUnexpected4xxCarriesTheErrorCode(t *testing.T) {
+	server, _ := newTestServer(t, reply{Status: http.StatusBadRequest, Body: map[string]any{
 		"success":      false,
-		"errorCode":    "IDEMPOTENCY_KEY_REUSED",
-		"errorMessage": "Key reused with a different body",
+		"errorCode":    "SOME_UNEXPECTED_CODE",
+		"errorMessage": "Request rejected for an unmodelled reason",
 	}})
 	client := newTestClient(t, server.URL)
 
@@ -464,10 +468,13 @@ func TestIdempotencyKeyReuseIsAnAPIError(t *testing.T) {
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("got %v, want *APIError", err)
 	}
-	if apiErr.HTTPStatus != 422 {
-		t.Fatalf("HTTPStatus = %d, want 422", apiErr.HTTPStatus)
+	if apiErr.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("HTTPStatus = %d, want 400", apiErr.HTTPStatus)
 	}
-	if apiErr.Error() != "Key reused with a different body" {
+	if apiErr.ErrorCode != "SOME_UNEXPECTED_CODE" {
+		t.Fatalf("ErrorCode = %q, want SOME_UNEXPECTED_CODE", apiErr.ErrorCode)
+	}
+	if apiErr.Error() != "Request rejected for an unmodelled reason" {
 		t.Fatalf("message = %q", apiErr.Error())
 	}
 }
