@@ -262,6 +262,10 @@ Options: `WithWebhookTolerance(d)` changes the freshness window from its 300 sec
 (`dominaite.DefaultWebhookTolerance`), and `WithWebhookClock(fn)` replaces the clock so tests
 can verify a recorded delivery at a fixed instant.
 
+There is no way to switch the freshness check off. `WithWebhookTolerance(0)` is the strictest
+setting, not an off switch: it requires `t` to equal your clock to the second, which rejects
+anything that spent time in flight. A negative duration is refused with `INVALID_TOLERANCE`.
+
 ### Getting the raw body right
 
 This is the one thing that reliably goes wrong. The signature covers the exact bytes that were
@@ -382,9 +386,9 @@ If you do only one of the two, do reconciliation. It is the one that cannot sile
 ### Rotating a secret
 
 Regenerating an endpoint's secret replaces it: the old secret stops verifying immediately.
-`VerifyWebhook` accepts multiple `v1` elements in one header, so an overlapping rotation works
-if the sender ever emits one, but do not count on an overlap window today. Update the secret in
-your configuration as part of the same change that regenerates it.
+There is no overlap window, and `VerifyWebhook` rejects a header carrying more than one `v1`
+rather than trying candidates in turn. Update the secret in your configuration as part of the
+same change that regenerates it.
 
 ### Testing your handler
 
