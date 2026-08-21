@@ -458,7 +458,11 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 		)
 	case resp.StatusCode >= 400:
 		message := firstNonEmpty(inner.ErrorMessage, envelope.Error.message(), "Request rejected")
-		return nil, newAPIError(resp.StatusCode, message)
+		apiErr := newAPIError(resp.StatusCode, message)
+		// Input rejections name a machine-readable code the same way refusals
+		// do; carry it so callers branch on the code, not on the message text.
+		apiErr.ErrorCode = firstNonEmpty(inner.ErrorCode, envelope.Error.code())
+		return nil, apiErr
 	}
 
 	return payload, nil
