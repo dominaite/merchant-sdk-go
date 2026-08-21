@@ -88,9 +88,15 @@ type AuthError struct {
 // HTTPStatus carries the code. A 422 means an idempotency key was replayed with
 // a different body; use a fresh key. A 404 from GetStatus means an unknown
 // transaction id.
+//
+// ErrorCode is the machine-readable code when the API sent one, so input
+// rejections can be branched on rather than string-matched. A 400 carrying
+// IDEMPOTENCY_KEY_REQUIRED means the Idempotency-Key header was missing or
+// empty. Empty when the API named no code.
 type APIError struct {
 	baseError
 	HTTPStatus int
+	ErrorCode  string
 }
 
 // TransportError means a network-level failure, a timeout, or a 5xx. The request

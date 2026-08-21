@@ -142,6 +142,34 @@ const (
 	StatusAbandoned         = "abandoned"
 )
 
+// Statuses is the complete v1 status vocabulary. A value outside this list means
+// the gateway grew a status this SDK does not know yet: keep polling, never
+// treat it as terminal.
+var Statuses = []string{
+	StatusPending,
+	StatusProcessing,
+	StatusSucceeded,
+	StatusFailed,
+	StatusRefunded,
+	StatusPartiallyRefunded,
+	StatusCancelled,
+	StatusDisputed,
+	StatusRequiresCapture,
+	StatusAbandoned,
+}
+
+// checkoutSessionEnvelope is the create-session response as it arrives on the
+// wire. Business refusals come back as HTTP 200 with success false, so the
+// branch is on Success, not on the status code. Checkout is present only on
+// success; TransactionID, ErrorCode and ErrorMessage only on a refusal.
+type checkoutSessionEnvelope struct {
+	Success       *bool           `json:"success"`
+	Checkout      json.RawMessage `json:"checkout"`
+	TransactionID string          `json:"transactionId"`
+	ErrorCode     string          `json:"errorCode"`
+	ErrorMessage  string          `json:"errorMessage"`
+}
+
 // CheckoutStatus is what GetStatus returns.
 type CheckoutStatus struct {
 	TransactionID  string `json:"transactionId"`
