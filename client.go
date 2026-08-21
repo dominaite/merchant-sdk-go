@@ -43,7 +43,7 @@ const (
 
 	// SessionsPath is the canonical path that gets signed. POST creates a
 	// session; GET SessionsPath + "/{transactionId}" reads its status.
-	SessionsPath = "/merchant-api/bridgerpay/checkout/sessions"
+	SessionsPath = "/merchant-api/checkout/sessions"
 
 	// PingPath is the credentials-and-clock smoke test. It creates nothing.
 	PingPath = "/merchant-api/ping"

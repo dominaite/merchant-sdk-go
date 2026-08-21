@@ -30,11 +30,11 @@ var vector = struct {
 	Secret:         "dms_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	Timestamp:      "1755302400",
 	Method:         "POST",
-	Path:           "/merchant-api/bridgerpay/checkout/sessions",
+	Path:           "/merchant-api/checkout/sessions",
 	IdempotencyKey: "00000000-0000-4000-8000-000000000001",
 	Body:           `{"amount":2500,"currency":"EUR","orderReference":"order-1042"}`,
 	BodySHA256:     "aa3edd72cd1829f4e053abb048b08c1ae91c2d67b08955997c4b6c4dab4f98ff",
-	Signature:      "95759958a0a0a9bd3e6e37101c01e8e7fee1166406e4ac2ff488764f5f742cbf",
+	Signature:      "8f5fba0b29a8eea81b76a0e6d7119e79ec68f586910f77713b045652e5ce9b74",
 }
 
 func vectorInput() SignInput {
