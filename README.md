@@ -382,9 +382,9 @@ If you do only one of the two, do reconciliation. It is the one that cannot sile
 ### Rotating a secret
 
 Regenerating an endpoint's secret replaces it: the old secret stops verifying immediately.
-`VerifyWebhook` accepts multiple `v1` elements in one header, so an overlapping rotation works
-if the sender ever emits one, but do not count on an overlap window today. Update the secret in
-your configuration as part of the same change that regenerates it.
+There is no overlap window, and `VerifyWebhook` rejects a header carrying more than one `v1`
+rather than trying candidates in turn. Update the secret in your configuration as part of the
+same change that regenerates it.
 
 ### Testing your handler
 

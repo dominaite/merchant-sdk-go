@@ -94,28 +94,21 @@ func VerifyWebhook(payload []byte, signatureHeader, secret string, opts ...Verif
 		)
 	}
 
-	timestamp, signatures, err := parseSignatureHeader(signatureHeader)
+	timestamp, signature, err := parseSignatureHeader(signatureHeader)
 	if err != nil {
 		return nil, err
 	}
 
-	// Sign first, then compare against each candidate in constant time. The
-	// signed payload is the ASCII concatenation "{t}.{raw_body}".
+	// Sign first, then compare in constant time. The signed payload is the
+	// ASCII concatenation "{t}.{raw_body}", where {t} is the raw digits from
+	// the header rather than a reparsed number.
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(timestamp))
 	mac.Write([]byte{'.'})
 	mac.Write(payload)
 	expected := mac.Sum(nil)
 
-	matched := false
-	for _, candidate := range signatures {
-		// No early break: every candidate is compared, so the work done does
-		// not leak which one matched.
-		if hmac.Equal(candidate, expected) {
-			matched = true
-		}
-	}
-	if !matched {
+	if !hmac.Equal(signature, expected) {
 		return nil, newWebhookVerificationError(
 			WebhookReasonSignatureMismatch,
 			"Webhook signature does not match - wrong secret, or the payload is not the bytes that were signed.",
@@ -165,59 +158,96 @@ func VerifyWebhook(payload []byte, signatureHeader, secret string, opts ...Verif
 	return event, nil
 }
 
-// parseSignatureHeader splits "t={unix_seconds},v1={hex}" into the timestamp
-// string (kept as text, because it is signed as text) and the decoded v1
-// candidates.
+// parseSignatureHeader splits "t={unix_seconds},v1={hex}" into the raw
+// timestamp text and the decoded MAC, following the normative grammar every
+// Dominaite SDK implements:
 //
-// Unknown elements are ignored rather than rejected, so a future scheme version
-// added alongside v1 does not break existing deployments. Repeated v1 elements
-// are all collected, which is what makes an overlapping secret rotation
-// possible without dropping deliveries.
-func parseSignatureHeader(header string) (string, [][]byte, error) {
-	malformed := func() (string, [][]byte, error) {
+//   - comma-separated key=value elements, no whitespace anywhere. An element
+//     with no "=" rejects the whole header.
+//   - exactly one t and exactly one v1. Any repeat rejects, even when one of
+//     the candidates carries a valid MAC.
+//   - unknown keys are ignored, so a future scheme version shipped alongside v1
+//     does not break deployed merchants.
+//   - t is one or more ASCII digits and nothing else. The raw substring is what
+//     gets signed, never a number parsed out of it and printed back.
+//   - v1 is exactly 64 lowercase hex characters.
+//
+// Collecting several v1 candidates and accepting if any of them matches used to
+// look like support for overlapping secret rotation. The platform does not do
+// that: there is never more than one valid candidate on the wire, and the
+// permissive read let a sender attach arbitrary extra elements next to the real
+// MAC and still verify.
+func parseSignatureHeader(header string) (string, []byte, error) {
+	malformed := func() (string, []byte, error) {
 		return "", nil, newWebhookVerificationError(
 			WebhookReasonMalformedSignature,
 			"Webhook signature header is missing or malformed - expected \"t=<unix_seconds>,v1=<hex>\".",
 		)
 	}
 
-	if strings.TrimSpace(header) == "" {
+	if header == "" {
 		return malformed()
 	}
 
-	var timestamp string
-	var signatures [][]byte
+	var timestamp, signature string
+	var haveTimestamp, haveSignature bool
 
 	for _, element := range strings.Split(header, ",") {
-		key, value, found := strings.Cut(strings.TrimSpace(element), "=")
+		key, value, found := strings.Cut(element, "=")
 		if !found {
-			continue
+			return malformed()
 		}
-		switch strings.TrimSpace(key) {
+		switch key {
 		case "t":
-			// A second, conflicting t would make "which timestamp was signed?"
-			// ambiguous, so refuse instead of picking one.
-			if timestamp != "" && timestamp != strings.TrimSpace(value) {
+			if haveTimestamp {
 				return malformed()
 			}
-			timestamp = strings.TrimSpace(value)
+			timestamp, haveTimestamp = value, true
 		case "v1":
-			decoded, err := hex.DecodeString(strings.TrimSpace(value))
-			if err != nil || len(decoded) != sha256.Size {
-				continue
+			if haveSignature {
+				return malformed()
 			}
-			signatures = append(signatures, decoded)
+			signature, haveSignature = value, true
 		}
 	}
 
-	if timestamp == "" || len(signatures) == 0 {
+	if !haveTimestamp || !haveSignature {
 		return malformed()
 	}
-	// Reject a non-numeric timestamp here too, so a garbage header never
-	// reaches the MAC step and comes back as a mismatch instead.
-	if _, err := strconv.ParseInt(timestamp, 10, 64); err != nil {
+	if !isASCIIDigits(timestamp) {
+		return malformed()
+	}
+	if len(signature) != hex.EncodedLen(sha256.Size) || !isLowerHex(signature) {
 		return malformed()
 	}
 
-	return timestamp, signatures, nil
+	decoded, err := hex.DecodeString(signature)
+	if err != nil {
+		return malformed()
+	}
+	return timestamp, decoded, nil
+}
+
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isLowerHex is deliberately case-sensitive. The platform only ever emits
+// lowercase, so folding case would widen what this SDK accepts for nothing.
+func isLowerHex(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

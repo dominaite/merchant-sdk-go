@@ -240,7 +240,6 @@ func TestVerifyWebhookRejectsMalformedHeaders(t *testing.T) {
 		"reversed order":         "v1=" + validMAC + ";t=" + webhookVector.Timestamp,
 		"json":                   `{"t":1755700000,"v1":"` + validMAC + `"}`,
 		"only commas":            ",,,,",
-		"huge timestamp":         "t=99999999999999999999999,v1=" + validMAC,
 	}
 
 	for name, header := range headers {
@@ -268,17 +267,28 @@ func TestVerifyWebhookRejectsMalformedHeaders(t *testing.T) {
 	}
 }
 
+// A timestamp of pure digits is well-formed however absurd its value, so the
+// parser passes it through and the MAC is what judges it. Previously the parser
+// rejected anything that would not fit an int64, which is a value judgement it
+// has no business making.
+func TestVerifyWebhookOversizedTimestampFailsOnTheMAC(t *testing.T) {
+	header := "t=99999999999999999999999,v1=" +
+		signWebhook(webhookVector.Secret, webhookVector.Timestamp, webhookVector.Body)
+	_, err := VerifyWebhook([]byte(webhookVector.Body), header, webhookVector.Secret, atVectorTime())
+	assertReason(t, err, WebhookReasonSignatureMismatch)
+}
+
 // Elements the scheme does not define yet are ignored rather than rejected, so
 // adding a v2 alongside v1 server-side will not break deployed merchants.
+// Element order does not matter either; whitespace and repeats do, and are
+// pinned in TestVerifyWebhookHeaderGrammarVectors.
 func TestVerifyWebhookIgnoresUnknownHeaderElements(t *testing.T) {
 	validMAC := signWebhook(webhookVector.Secret, webhookVector.Timestamp, webhookVector.Body)
 	headers := []string{
 		"t=" + webhookVector.Timestamp + ",v1=" + validMAC + ",v2=deadbeef",
-		"t=" + webhookVector.Timestamp + ", v1=" + validMAC,
 		"v1=" + validMAC + ",t=" + webhookVector.Timestamp,
-		// One stale signature next to the current one: an overlapping rotation
-		// must not drop deliveries.
-		"t=" + webhookVector.Timestamp + ",v1=" + strings.Repeat("00", 32) + ",v1=" + validMAC,
+		// An unknown key may itself repeat, and its value is never inspected.
+		"t=" + webhookVector.Timestamp + ",v2=,v1=" + validMAC + ",v2=zzz",
 	}
 	for _, header := range headers {
 		if _, err := VerifyWebhook([]byte(webhookVector.Body), header, webhookVector.Secret, atVectorTime()); err != nil {
