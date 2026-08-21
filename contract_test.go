@@ -31,6 +31,7 @@ type responseContract struct {
 	Version                  string   `json:"version"`
 	StatusVocabulary         []string `json:"statusVocabulary"`
 	SessionRefusalErrorCodes []string `json:"sessionRefusalErrorCodes"`
+	ValidationErrorCodes     []string `json:"validationErrorCodes"`
 	Endpoints                struct {
 		Ping                  endpointContract `json:"ping"`
 		CreateCheckoutSession endpointContract `json:"createCheckoutSession"`
@@ -303,6 +304,60 @@ func TestSessionRefusalErrorCodesAreRecognized(t *testing.T) {
 				t.Error("must match errors.Is(err, ErrDominaite)")
 			}
 		})
+	}
+}
+
+// Validation codes are a DIFFERENT shape from refusals: HTTP 400, not a 200
+// with success false. They must still arrive as a machine-readable code, or the
+// only way to tell "you forgot the idempotency key" from any other 400 is to
+// string-match the message.
+func TestValidationErrorCodesAreRecognized(t *testing.T) {
+	contract := loadContract(t)
+
+	if len(contract.ValidationErrorCodes) == 0 {
+		t.Fatal("the contract lists no validation codes")
+	}
+
+	for _, code := range contract.ValidationErrorCodes {
+		// Both error shapes the gateway uses: the flat one and the nested
+		// envelope. A code must survive either.
+		shapes := map[string]any{
+			"flat": map[string]any{
+				"errorCode":    code,
+				"errorMessage": "rejected",
+			},
+			"envelope": map[string]any{
+				"success": false,
+				"error":   map[string]any{"code": code, "message": "rejected"},
+			},
+		}
+
+		for shape, body := range shapes {
+			t.Run(code+"/"+shape, func(t *testing.T) {
+				server, _ := newTestServer(t, reply{Status: 400, Body: body})
+				_, err := newTestClient(t, server.URL).CreateCheckoutSession(context.Background(), testParams())
+
+				var apiErr *APIError
+				if !errors.As(err, &apiErr) {
+					t.Fatalf("got %T (%v), want *APIError", err, err)
+				}
+				if apiErr.HTTPStatus != 400 {
+					t.Errorf("HTTPStatus = %d, want 400", apiErr.HTTPStatus)
+				}
+				if apiErr.ErrorCode != code {
+					t.Errorf("ErrorCode = %q, want %q", apiErr.ErrorCode, code)
+				}
+				// A validation failure is not a refusal: the request never
+				// created anything, so retrying the same key cannot help.
+				var refusal *RefusalError
+				if errors.As(err, &refusal) {
+					t.Error("a 400 must not surface as a *RefusalError")
+				}
+				if !errors.Is(err, ErrDominaite) {
+					t.Error("must match errors.Is(err, ErrDominaite)")
+				}
+			})
+		}
 	}
 }
 
