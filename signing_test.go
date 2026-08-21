@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -121,6 +122,32 @@ func TestSignInputNeverPrintsTheSecret(t *testing.T) {
 			if !strings.Contains(printed, vector.Path) {
 				t.Fatalf("%s on a %s dropped the fields worth debugging: %s", verb, name, printed)
 			}
+		}
+	}
+}
+
+// Structured loggers encode the struct instead of calling String, so the
+// json:"-" tag is the only thing standing between SignInput.Secret and a log
+// aggregator. slog's JSONHandler, zap and zerolog all take this path.
+func TestSignInputIsNotJSONSerializable(t *testing.T) {
+	in := vectorInput()
+
+	for name, value := range map[string]any{"value": in, "pointer": &in} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("json.Marshal(%s): %v", name, err)
+		}
+		if strings.Contains(string(encoded), vector.Secret) {
+			t.Fatalf("json.Marshal on a %s leaked the secret: %s", name, encoded)
+		}
+		if strings.Contains(string(encoded), vector.Secret[:12]) {
+			t.Fatalf("json.Marshal on a %s leaked part of the secret: %s", name, encoded)
+		}
+		if strings.Contains(string(encoded), "Secret") {
+			t.Fatalf("json.Marshal on a %s kept a Secret key: %s", name, encoded)
+		}
+		if !strings.Contains(string(encoded), vector.Path) {
+			t.Fatalf("json.Marshal on a %s dropped the fields worth debugging: %s", name, encoded)
 		}
 	}
 }

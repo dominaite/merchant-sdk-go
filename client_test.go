@@ -734,12 +734,13 @@ func TestGeneratedIdempotencyKeysAreUniqueUUIDs(t *testing.T) {
 
 // newRedirectServer serves a redirect to a second server that would happily
 // answer with a forged, well-formed checkout session. It reports how many times
-// the redirect target was actually hit.
-func newRedirectServer(t *testing.T, status int) (*httptest.Server, func() int) {
+// the redirect target was hit (never, once the hop is refused) and how many
+// times the redirecting server itself was called (once per attempt).
+func newRedirectServer(t *testing.T, status int) (server *httptest.Server, targetHits func() int, attempts func() int) {
 	t.Helper()
 
 	var mu sync.Mutex
-	hits := 0
+	hits, calls := 0, 0
 
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -752,21 +753,29 @@ func newRedirectServer(t *testing.T, status int) (*httptest.Server, func() int) 
 	t.Cleanup(target.Close)
 
 	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+
 		http.Redirect(w, r, target.URL+r.URL.Path, status)
 	}))
 	t.Cleanup(redirector.Close)
 
-	return redirector, func() int {
-		mu.Lock()
-		defer mu.Unlock()
-		return hits
+	count := func(of *int) func() int {
+		return func() int {
+			mu.Lock()
+			defer mu.Unlock()
+			return *of
+		}
 	}
+
+	return redirector, count(&hits), count(&calls)
 }
 
 func TestRedirectsAreNotFollowed(t *testing.T) {
 	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
-			server, hits := newRedirectServer(t, status)
+			server, targetHits, _ := newRedirectServer(t, status)
 			client := newTestClient(t, server.URL)
 
 			session, err := client.CreateCheckoutSession(context.Background(), testParams())
@@ -783,7 +792,7 @@ func TestRedirectsAreNotFollowed(t *testing.T) {
 			if !strings.Contains(apiErr.Error(), "redirect") {
 				t.Fatalf("the message must name the redirect: %s", apiErr.Error())
 			}
-			if got := hits(); got != 0 {
+			if got := targetHits(); got != 0 {
 				t.Fatalf("the redirect target was hit %d times; credentials leak on the hop", got)
 			}
 		})
@@ -791,7 +800,7 @@ func TestRedirectsAreNotFollowed(t *testing.T) {
 }
 
 func TestRedirectsAreNotRetried(t *testing.T) {
-	server, hits := newRedirectServer(t, http.StatusMovedPermanently)
+	server, targetHits, attempts := newRedirectServer(t, http.StatusMovedPermanently)
 	client := newTestClient(t, server.URL)
 
 	_, err := client.CreateCheckoutSessionWithRetry(context.Background(), testParams(), RetryOptions{
@@ -802,13 +811,19 @@ func TestRedirectsAreNotRetried(t *testing.T) {
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("got %v, want *APIError", err)
 	}
-	if got := hits(); got != 0 {
+	// The point of the test: a 3xx is not a *TransportError, so the helper must
+	// give up after ONE attempt rather than replaying signed headers at whatever
+	// is answering.
+	if got := attempts(); got != 1 {
+		t.Fatalf("the API was called %d times, want 1; a redirect must not be retried", got)
+	}
+	if got := targetHits(); got != 0 {
 		t.Fatalf("the redirect target was hit %d times; credentials leak on the hop", got)
 	}
 }
 
 func TestRedirectsAreNotFollowedWithACustomHTTPClient(t *testing.T) {
-	server, hits := newRedirectServer(t, http.StatusFound)
+	server, targetHits, _ := newRedirectServer(t, http.StatusFound)
 	custom := &http.Client{Timeout: 5 * time.Second}
 
 	client, err := New(testKeyID, vector.Secret, WithBaseURL(server.URL), WithHTTPClient(custom))
@@ -819,7 +834,7 @@ func TestRedirectsAreNotFollowedWithACustomHTTPClient(t *testing.T) {
 	if _, err := client.CreateCheckoutSession(context.Background(), testParams()); err == nil {
 		t.Fatal("want an error, got none")
 	}
-	if got := hits(); got != 0 {
+	if got := targetHits(); got != 0 {
 		t.Fatalf("the redirect target was hit %d times; credentials leak on the hop", got)
 	}
 	if custom.CheckRedirect != nil {

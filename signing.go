@@ -10,8 +10,10 @@ import (
 
 // SignInput is everything that goes into one request signature.
 type SignInput struct {
-	// Secret is your API secret (dms_...).
-	Secret string
+	// Secret is your API secret (dms_...). json:"-" keeps it out of every
+	// structured JSON logger: those encode the struct rather than calling
+	// String, so a tag is the only thing that stops them.
+	Secret string `json:"-"`
 	// Timestamp is unix SECONDS, as sent in X-Timestamp.
 	Timestamp string
 	// Method is the HTTP method. Uppercased before signing.

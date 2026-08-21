@@ -561,8 +561,20 @@ dominaite.Sign(dominaite.SignInput{
 // "95759958a0a0a9bd3e6e37101c01e8e7fee1166406e4ac2ff488764f5f742cbf"
 ```
 
-Printing a `SignInput` or a `Client` is safe: both redact the secret under `%v`, `%+v` and
-`%#v`, so a debug log shows `dms_***redacted***` and every other field.
+Printing a `SignInput` or a `Client` **itself** is safe: both redact the secret under `%v`,
+`%+v`, `%#v` and `%s`, so a debug log shows `dms_***redacted***` and every other field.
+`SignInput` also carries `json:"-"` on `Secret`, so JSON encoders drop it.
+
+Two cases the redaction cannot reach, because neither goes through the `String` method:
+
+- A `SignInput` or `Client` sitting in an **unexported field of your own struct**, printed by
+  printing that outer struct. `fmt` cannot call methods on values it reaches by reflection, so
+  it dumps the fields raw: a by-value field leaks under `%v`, `%+v` and `%s`, and even the
+  usual `client *dominaite.Client` field leaks under `%s`.
+- Any encoder that walks the struct instead of printing it. `SignInput` is covered by the tag;
+  anything else you build around your secret is not.
+
+Keep the secret out of structured logs entirely rather than relying on redaction.
 
 The signed payload is five lines:
 `"{timestamp}\n{METHOD}\n{path}\n{idempotencyKey}\n{sha256hex(body)}"`, signed as lowercase hex
