@@ -723,3 +723,98 @@ func TestGeneratedIdempotencyKeysAreUniqueUUIDs(t *testing.T) {
 		seen[key] = true
 	}
 }
+
+// newRedirectServer serves a redirect to a second server that would happily
+// answer with a forged, well-formed checkout session. It reports how many times
+// the redirect target was actually hit.
+func newRedirectServer(t *testing.T, status int) (*httptest.Server, func() int) {
+	t.Helper()
+
+	var mu sync.Mutex
+	hits := 0
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "checkout": testCheckout})
+	}))
+	t.Cleanup(target.Close)
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, status)
+	}))
+	t.Cleanup(redirector.Close)
+
+	return redirector, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return hits
+	}
+}
+
+func TestRedirectsAreNotFollowed(t *testing.T) {
+	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			server, hits := newRedirectServer(t, status)
+			client := newTestClient(t, server.URL)
+
+			session, err := client.CreateCheckoutSession(context.Background(), testParams())
+			if session != nil {
+				t.Fatal("a redirect target's response must never be returned as a session")
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("got %v, want *APIError", err)
+			}
+			if apiErr.HTTPStatus != status {
+				t.Fatalf("got HTTPStatus %d, want %d", apiErr.HTTPStatus, status)
+			}
+			if !strings.Contains(apiErr.Error(), "redirect") {
+				t.Fatalf("the message must name the redirect: %s", apiErr.Error())
+			}
+			if got := hits(); got != 0 {
+				t.Fatalf("the redirect target was hit %d times; credentials leak on the hop", got)
+			}
+		})
+	}
+}
+
+func TestRedirectsAreNotRetried(t *testing.T) {
+	server, hits := newRedirectServer(t, http.StatusMovedPermanently)
+	client := newTestClient(t, server.URL)
+
+	_, err := client.CreateCheckoutSessionWithRetry(context.Background(), testParams(), RetryOptions{
+		Attempts:  3,
+		BaseDelay: time.Millisecond,
+	})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("got %v, want *APIError", err)
+	}
+	if got := hits(); got != 0 {
+		t.Fatalf("the redirect target was hit %d times; credentials leak on the hop", got)
+	}
+}
+
+func TestRedirectsAreNotFollowedWithACustomHTTPClient(t *testing.T) {
+	server, hits := newRedirectServer(t, http.StatusFound)
+	custom := &http.Client{Timeout: 5 * time.Second}
+
+	client, err := New(testKeyID, vector.Secret, WithBaseURL(server.URL), WithHTTPClient(custom))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, err := client.CreateCheckoutSession(context.Background(), testParams()); err == nil {
+		t.Fatal("want an error, got none")
+	}
+	if got := hits(); got != 0 {
+		t.Fatalf("the redirect target was hit %d times; credentials leak on the hop", got)
+	}
+	if custom.CheckRedirect != nil {
+		t.Fatal("the caller's own client must not be modified")
+	}
+}

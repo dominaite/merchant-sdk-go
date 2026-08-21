@@ -504,7 +504,7 @@ For the specific kind, use `errors.As` with the concrete pointer type:
 | `*RefusalError` | The API answered with `success: false`. `ErrorCode` carries the reason. | Branch on `ErrorCode`. Do not blind-retry. |
 | `*AuthError` | 401/403. `ErrorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
 | `*TransportError` | Network failure, timeout, or 5xx (`MERCHANT_API_UNAVAILABLE`). Wraps the cause, reachable with `errors.Unwrap`. | Retry with the **same** idempotency key. |
-| `*APIError` | Any other rejecting or unexpected response; `HTTPStatus` carries the code. | Inspect. A 422 means an idempotency key was replayed with a different body - use a fresh key. |
+| `*APIError` | Any other rejecting or unexpected response; `HTTPStatus` carries the code. | Inspect. A 422 means an idempotency key was replayed with a different body - use a fresh key. A 3xx means a proxy or a wrong base URL answered with a redirect - the SDK never follows one. |
 | `*ValidationError` | Bad arguments (non-positive amount, missing field, malformed key id). | Fix the call; nothing was sent. |
 | `*WebhookVerificationError` | `VerifyWebhook` rejected an inbound delivery; `Reason` carries which check failed. | Answer 400 with no detail. See [Webhooks](#rejections). |
 

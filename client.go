@@ -84,10 +84,14 @@ func WithBaseURL(baseURL string) Option {
 // WithHTTPClient supplies your own *http.Client: a proxy-aware transport,
 // custom TLS, or a test double. It replaces WithTimeout, so set the timeout on
 // the client you pass.
+//
+// The client is shallow-copied, so the SDK can pin its own redirect policy
+// without changing the behaviour of the client you keep using elsewhere.
 func WithHTTPClient(httpClient *http.Client) Option {
 	return func(c *Client) {
 		if httpClient != nil {
-			c.httpClient = httpClient
+			copied := *httpClient
+			c.httpClient = &copied
 		}
 	}
 }
@@ -134,6 +138,15 @@ func New(keyID, secret string, opts ...Option) (*Client, error) {
 	}
 	for _, opt := range opts {
 		opt(client)
+	}
+
+	// Never follow a redirect. Go strips Authorization-class headers on a
+	// cross-origin hop but keeps ours, so following one would hand X-Signature,
+	// X-Api-Key-Id, X-Timestamp and Idempotency-Key to whatever host the
+	// Location points at, and 301/302/303 would turn the POST into a GET. The
+	// Dominaite API never redirects, so a 3xx is always an error - see request.
+	client.httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 
 	return client, nil
@@ -420,6 +433,17 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 		return nil, newTransportError("Could not reach the Dominaite API: "+err.Error(), err)
 	}
 	defer resp.Body.Close()
+
+	// The client does not follow redirects, so a 3xx arrives here as the final
+	// response. The Dominaite API never emits one: it means a proxy, a captive
+	// portal or a hijacked base URL is answering, and its body is not an
+	// authentic API response. Fail loudly and do not retry.
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return nil, newAPIError(resp.StatusCode, fmt.Sprintf(
+			"Unexpected redirect response (HTTP %d); the Dominaite API never redirects. Check your base URL and any proxy in front of it.",
+			resp.StatusCode,
+		))
+	}
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
