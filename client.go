@@ -187,13 +187,7 @@ func (c *Client) CreateCheckoutSession(ctx context.Context, params CreateCheckou
 		return nil, err
 	}
 
-	var envelope struct {
-		Success       *bool           `json:"success"`
-		Checkout      json.RawMessage `json:"checkout"`
-		TransactionID string          `json:"transactionId"`
-		ErrorCode     string          `json:"errorCode"`
-		ErrorMessage  string          `json:"errorMessage"`
-	}
+	var envelope checkoutSessionEnvelope
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return nil, newAPIError(http.StatusOK, "The API returned an unexpected create-session response")
 	}
@@ -464,7 +458,11 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 		)
 	case resp.StatusCode >= 400:
 		message := firstNonEmpty(inner.ErrorMessage, envelope.Error.message(), "Request rejected")
-		return nil, newAPIError(resp.StatusCode, message)
+		apiErr := newAPIError(resp.StatusCode, message)
+		// Input rejections name a machine-readable code the same way refusals
+		// do; carry it so callers branch on the code, not on the message text.
+		apiErr.ErrorCode = firstNonEmpty(inner.ErrorCode, envelope.Error.code())
+		return nil, apiErr
 	}
 
 	return payload, nil
