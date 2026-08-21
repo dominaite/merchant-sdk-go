@@ -431,6 +431,12 @@ Every `CreateCheckoutSession` call carries an idempotency key (auto-generated, o
 in `IdempotencyKey`). Retrying with the same key never opens a second payment - on a timeout,
 retry with the same key rather than generating a new one.
 
+What a retry does **not** do is hand back the session the first attempt created. If that attempt
+landed, the retry comes back as a `*RefusalError` with a replay code (`DUPLICATE_REQUEST`,
+`ALREADY_PROCESSED`, `PRIOR_ATTEMPT_FAILED`, `IDEMPOTENCY_KEY_REUSED`) and no cashier fields.
+Recover through `RefusalError.TransactionID` and `GetStatus` - see
+[Recovering from a replay refusal](#recovering-from-a-replay-refusal) below.
+
 `CreateCheckoutSessionWithRetry` does that for you: it pins one key up front and reuses it
 across attempts, retrying only `*TransportError` (network failures and 5xx, including
 `MERCHANT_API_UNAVAILABLE`). Refusals and authentication failures are not retried - they will
@@ -504,7 +510,7 @@ For the specific kind, use `errors.As` with the concrete pointer type:
 | `*RefusalError` | The API answered with `success: false`. `ErrorCode` carries the reason. | Branch on `ErrorCode`. Do not blind-retry. |
 | `*AuthError` | 401/403. `ErrorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
 | `*TransportError` | Network failure, timeout, or 5xx (`MERCHANT_API_UNAVAILABLE`). Wraps the cause, reachable with `errors.Unwrap`. | Retry with the **same** idempotency key. |
-| `*APIError` | Any other rejecting or unexpected response; `HTTPStatus` carries the code. | Inspect. A 422 means an idempotency key was replayed with a different body - use a fresh key. |
+| `*APIError` | Any other rejecting or unexpected response; `HTTPStatus` carries the code. | Inspect. A 3xx means a proxy or a wrong base URL answered with a redirect - the SDK never follows one. A replayed idempotency key does not land here; it comes back as a `*RefusalError`. |
 | `*ValidationError` | Bad arguments (non-positive amount, missing field, malformed key id). | Fix the call; nothing was sent. |
 | `*WebhookVerificationError` | `VerifyWebhook` rejected an inbound delivery; `Reason` carries which check failed. | Answer 400 with no detail. See [Webhooks](#rejections). |
 
@@ -554,6 +560,21 @@ dominaite.Sign(dominaite.SignInput{
 })
 // "95759958a0a0a9bd3e6e37101c01e8e7fee1166406e4ac2ff488764f5f742cbf"
 ```
+
+Printing a `SignInput` or a `Client` **itself** is safe: both redact the secret under `%v`,
+`%+v`, `%#v` and `%s`, so a debug log shows `dms_***redacted***` and every other field.
+`SignInput` also carries `json:"-"` on `Secret`, so JSON encoders drop it.
+
+Two cases the redaction cannot reach, because neither goes through the `String` method:
+
+- A `SignInput` or `Client` sitting in an **unexported field of your own struct**, printed by
+  printing that outer struct. `fmt` cannot call methods on values it reaches by reflection, so
+  it dumps the fields raw: a by-value field leaks under `%v`, `%+v` and `%s`, and even the
+  usual `client *dominaite.Client` field leaks under `%s`.
+- Any encoder that walks the struct instead of printing it. `SignInput` is covered by the tag;
+  anything else you build around your secret is not.
+
+Keep the secret out of structured logs entirely rather than relying on redaction.
 
 The signed payload is five lines:
 `"{timestamp}\n{METHOD}\n{path}\n{idempotencyKey}\n{sha256hex(body)}"`, signed as lowercase hex

@@ -67,6 +67,27 @@ type Client struct {
 	now        func() time.Time
 }
 
+// String keeps the secret out of your logs. Printing a Client with %v, %+v or
+// %#v (value or pointer) shows the key id and the base URL, never the secret.
+func (c Client) String() string {
+	return fmt.Sprintf("dominaite.Client{keyID: %q, baseURL: %q, secret: %s}", c.keyID, c.baseURL, redactSecret(c.secret))
+}
+
+// GoString covers %#v, which does not use String.
+func (c Client) GoString() string { return c.String() }
+
+// redactSecret renders a secret for humans without disclosing any of it. It
+// never returns a prefix of the real value.
+func redactSecret(secret string) string {
+	if secret == "" {
+		return `""`
+	}
+	if strings.HasPrefix(secret, "dms_") {
+		return "dms_***redacted***"
+	}
+	return "***redacted***"
+}
+
 // Option configures a Client. Pass options to New.
 type Option func(*Client)
 
@@ -84,10 +105,14 @@ func WithBaseURL(baseURL string) Option {
 // WithHTTPClient supplies your own *http.Client: a proxy-aware transport,
 // custom TLS, or a test double. It replaces WithTimeout, so set the timeout on
 // the client you pass.
+//
+// The client is shallow-copied, so the SDK can pin its own redirect policy
+// without changing the behaviour of the client you keep using elsewhere.
 func WithHTTPClient(httpClient *http.Client) Option {
 	return func(c *Client) {
 		if httpClient != nil {
-			c.httpClient = httpClient
+			copied := *httpClient
+			c.httpClient = &copied
 		}
 	}
 }
@@ -134,6 +159,15 @@ func New(keyID, secret string, opts ...Option) (*Client, error) {
 	}
 	for _, opt := range opts {
 		opt(client)
+	}
+
+	// Never follow a redirect. Go strips Authorization-class headers on a
+	// cross-origin hop but keeps ours, so following one would hand X-Signature,
+	// X-Api-Key-Id, X-Timestamp and Idempotency-Key to whatever host the
+	// Location points at, and 301/302/303 would turn the POST into a GET. The
+	// Dominaite API never redirects, so a 3xx is always an error - see request.
+	client.httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 
 	return client, nil
@@ -252,10 +286,16 @@ func (o RetryOptions) withDefaults() (int, time.Duration, error) {
 // only, with THE SAME idempotency key across every attempt.
 //
 // Reusing the key is what makes the retry safe. A transport failure leaves you
-// not knowing whether the request landed; the API returns the original session
-// for a key it has already seen instead of opening a second one. Generating a
-// fresh key per attempt would be exactly the double-charge bug this method
-// exists to prevent, so the key is pinned once before the first attempt.
+// not knowing whether the request landed; a key the API has already seen is
+// refused instead of opening a second session. Generating a fresh key per
+// attempt would be exactly the double-charge bug this method exists to
+// prevent, so the key is pinned once before the first attempt.
+//
+// A retry after the first attempt DID land does not give you that session
+// back. The API answers with a replay refusal (*RefusalError, ErrorCode
+// DUPLICATE_REQUEST, ALREADY_PROCESSED, PRIOR_ATTEMPT_FAILED or
+// IDEMPOTENCY_KEY_REUSED) and no cashier fields. Recover through
+// RefusalError.TransactionID with GetStatus when the API named one.
 //
 // Refusals and authentication failures are returned immediately. They will not
 // change on a retry.
@@ -420,6 +460,17 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 		return nil, newTransportError("Could not reach the Dominaite API: "+err.Error(), err)
 	}
 	defer resp.Body.Close()
+
+	// The client does not follow redirects, so a 3xx arrives here as the final
+	// response. The Dominaite API never emits one: it means a proxy, a captive
+	// portal or a hijacked base URL is answering, and its body is not an
+	// authentic API response. Fail loudly and do not retry.
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return nil, newAPIError(resp.StatusCode, fmt.Sprintf(
+			"Unexpected redirect response (HTTP %d); the Dominaite API never redirects. Check your base URL and any proxy in front of it.",
+			resp.StatusCode,
+		))
+	}
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {

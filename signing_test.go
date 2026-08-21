@@ -4,6 +4,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -96,5 +98,56 @@ func TestSignGetShapeUsesEmptyKeyAndEmptyBody(t *testing.T) {
 	mac.Write([]byte(payload))
 	if want := hex.EncodeToString(mac.Sum(nil)); got != want {
 		t.Fatalf("GET signature = %s, want %s", got, want)
+	}
+}
+
+func TestSignInputNeverPrintsTheSecret(t *testing.T) {
+	in := vectorInput()
+
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+		for name, printed := range map[string]string{
+			"value":   fmt.Sprintf(verb, in),
+			"pointer": fmt.Sprintf(verb, &in),
+		} {
+			if strings.Contains(printed, vector.Secret) {
+				t.Fatalf("%s on a %s leaked the secret: %s", verb, name, printed)
+			}
+			// A prefix of the secret is still the secret.
+			if strings.Contains(printed, vector.Secret[:12]) {
+				t.Fatalf("%s on a %s leaked part of the secret: %s", verb, name, printed)
+			}
+			if !strings.Contains(printed, "redacted") {
+				t.Fatalf("%s on a %s does not say the secret was redacted: %s", verb, name, printed)
+			}
+			if !strings.Contains(printed, vector.Path) {
+				t.Fatalf("%s on a %s dropped the fields worth debugging: %s", verb, name, printed)
+			}
+		}
+	}
+}
+
+// Structured loggers encode the struct instead of calling String, so the
+// json:"-" tag is the only thing standing between SignInput.Secret and a log
+// aggregator. slog's JSONHandler, zap and zerolog all take this path.
+func TestSignInputIsNotJSONSerializable(t *testing.T) {
+	in := vectorInput()
+
+	for name, value := range map[string]any{"value": in, "pointer": &in} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("json.Marshal(%s): %v", name, err)
+		}
+		if strings.Contains(string(encoded), vector.Secret) {
+			t.Fatalf("json.Marshal on a %s leaked the secret: %s", name, encoded)
+		}
+		if strings.Contains(string(encoded), vector.Secret[:12]) {
+			t.Fatalf("json.Marshal on a %s leaked part of the secret: %s", name, encoded)
+		}
+		if strings.Contains(string(encoded), "Secret") {
+			t.Fatalf("json.Marshal on a %s kept a Secret key: %s", name, encoded)
+		}
+		if !strings.Contains(string(encoded), vector.Path) {
+			t.Fatalf("json.Marshal on a %s dropped the fields worth debugging: %s", name, encoded)
+		}
 	}
 }

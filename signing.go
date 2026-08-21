@@ -4,13 +4,16 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 )
 
 // SignInput is everything that goes into one request signature.
 type SignInput struct {
-	// Secret is your API secret (dms_...).
-	Secret string
+	// Secret is your API secret (dms_...). json:"-" keeps it out of every
+	// structured JSON logger: those encode the struct rather than calling
+	// String, so a tag is the only thing that stops them.
+	Secret string `json:"-"`
 	// Timestamp is unix SECONDS, as sent in X-Timestamp.
 	Timestamp string
 	// Method is the HTTP method. Uppercased before signing.
@@ -22,6 +25,19 @@ type SignInput struct {
 	// Body is the exact request body string that will be sent. Empty string for GET.
 	Body string
 }
+
+// String keeps the secret out of your logs. Debugging an INVALID_SIGNATURE
+// usually means printing the input that produced it, so printing a SignInput
+// with %v, %+v or %#v (value or pointer) shows every field except the secret.
+func (in SignInput) String() string {
+	return fmt.Sprintf(
+		"dominaite.SignInput{Secret: %s, Timestamp: %q, Method: %q, Path: %q, IdempotencyKey: %q, Body: %q}",
+		redactSecret(in.Secret), in.Timestamp, in.Method, in.Path, in.IdempotencyKey, in.Body,
+	)
+}
+
+// GoString covers %#v, which does not use String.
+func (in SignInput) GoString() string { return in.String() }
 
 // Sign builds the X-Signature value for one request: lowercase hex HMAC-SHA256
 // over
