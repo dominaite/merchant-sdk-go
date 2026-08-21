@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -816,5 +817,30 @@ func TestRedirectsAreNotFollowedWithACustomHTTPClient(t *testing.T) {
 	}
 	if custom.CheckRedirect != nil {
 		t.Fatal("the caller's own client must not be modified")
+	}
+}
+
+func TestClientNeverPrintsTheSecret(t *testing.T) {
+	client := newTestClient(t, "https://example.test")
+
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+		for name, printed := range map[string]string{
+			"value":   fmt.Sprintf(verb, *client),
+			"pointer": fmt.Sprintf(verb, client),
+		} {
+			if strings.Contains(printed, vector.Secret) {
+				t.Fatalf("%s on a %s leaked the secret: %s", verb, name, printed)
+			}
+			// A prefix of the secret is still the secret.
+			if strings.Contains(printed, vector.Secret[:12]) {
+				t.Fatalf("%s on a %s leaked part of the secret: %s", verb, name, printed)
+			}
+			if !strings.Contains(printed, "redacted") {
+				t.Fatalf("%s on a %s does not say the secret was redacted: %s", verb, name, printed)
+			}
+			if !strings.Contains(printed, testKeyID) {
+				t.Fatalf("%s on a %s dropped the key id: %s", verb, name, printed)
+			}
+		}
 	}
 }

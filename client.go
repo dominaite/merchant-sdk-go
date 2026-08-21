@@ -67,6 +67,27 @@ type Client struct {
 	now        func() time.Time
 }
 
+// String keeps the secret out of your logs. Printing a Client with %v, %+v or
+// %#v (value or pointer) shows the key id and the base URL, never the secret.
+func (c Client) String() string {
+	return fmt.Sprintf("dominaite.Client{keyID: %q, baseURL: %q, secret: %s}", c.keyID, c.baseURL, redactSecret(c.secret))
+}
+
+// GoString covers %#v, which does not use String.
+func (c Client) GoString() string { return c.String() }
+
+// redactSecret renders a secret for humans without disclosing any of it. It
+// never returns a prefix of the real value.
+func redactSecret(secret string) string {
+	if secret == "" {
+		return `""`
+	}
+	if strings.HasPrefix(secret, "dms_") {
+		return "dms_***redacted***"
+	}
+	return "***redacted***"
+}
+
 // Option configures a Client. Pass options to New.
 type Option func(*Client)
 

@@ -555,6 +555,9 @@ dominaite.Sign(dominaite.SignInput{
 // "95759958a0a0a9bd3e6e37101c01e8e7fee1166406e4ac2ff488764f5f742cbf"
 ```
 
+Printing a `SignInput` or a `Client` is safe: both redact the secret under `%v`, `%+v` and
+`%#v`, so a debug log shows `dms_***redacted***` and every other field.
+
 The signed payload is five lines:
 `"{timestamp}\n{METHOD}\n{path}\n{idempotencyKey}\n{sha256hex(body)}"`, signed as lowercase hex
 HMAC-SHA256 with your secret, UTF-8 throughout. GET signs an empty idempotency key and an empty
