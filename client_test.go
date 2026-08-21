@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -449,11 +450,15 @@ func TestAuthErrorFromEnvelopeErrorCode(t *testing.T) {
 	}
 }
 
-func TestIdempotencyKeyReuseIsAnAPIError(t *testing.T) {
-	server, _ := newTestServer(t, reply{Status: 422, Body: map[string]any{
+// A rejecting 4xx must carry its machine-readable code through, so callers
+// branch on the code instead of matching the message text. Idempotency-key
+// replays are NOT this shape - they are HTTP 200 refusals, pinned by
+// TestSessionRefusalErrorCodesAreRecognized.
+func TestUnexpected4xxCarriesTheErrorCode(t *testing.T) {
+	server, _ := newTestServer(t, reply{Status: http.StatusBadRequest, Body: map[string]any{
 		"success":      false,
-		"errorCode":    "IDEMPOTENCY_KEY_REUSED",
-		"errorMessage": "Key reused with a different body",
+		"errorCode":    "SOME_UNEXPECTED_CODE",
+		"errorMessage": "Request rejected for an unmodelled reason",
 	}})
 	client := newTestClient(t, server.URL)
 
@@ -463,10 +468,13 @@ func TestIdempotencyKeyReuseIsAnAPIError(t *testing.T) {
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("got %v, want *APIError", err)
 	}
-	if apiErr.HTTPStatus != 422 {
-		t.Fatalf("HTTPStatus = %d, want 422", apiErr.HTTPStatus)
+	if apiErr.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("HTTPStatus = %d, want 400", apiErr.HTTPStatus)
 	}
-	if apiErr.Error() != "Key reused with a different body" {
+	if apiErr.ErrorCode != "SOME_UNEXPECTED_CODE" {
+		t.Fatalf("ErrorCode = %q, want SOME_UNEXPECTED_CODE", apiErr.ErrorCode)
+	}
+	if apiErr.Error() != "Request rejected for an unmodelled reason" {
 		t.Fatalf("message = %q", apiErr.Error())
 	}
 }
@@ -721,5 +729,140 @@ func TestGeneratedIdempotencyKeysAreUniqueUUIDs(t *testing.T) {
 			t.Fatalf("duplicate idempotency key: %s", key)
 		}
 		seen[key] = true
+	}
+}
+
+// newRedirectServer serves a redirect to a second server that would happily
+// answer with a forged, well-formed checkout session. It reports how many times
+// the redirect target was hit (never, once the hop is refused) and how many
+// times the redirecting server itself was called (once per attempt).
+func newRedirectServer(t *testing.T, status int) (server *httptest.Server, targetHits func() int, attempts func() int) {
+	t.Helper()
+
+	var mu sync.Mutex
+	hits, calls := 0, 0
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "checkout": testCheckout})
+	}))
+	t.Cleanup(target.Close)
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+
+		http.Redirect(w, r, target.URL+r.URL.Path, status)
+	}))
+	t.Cleanup(redirector.Close)
+
+	count := func(of *int) func() int {
+		return func() int {
+			mu.Lock()
+			defer mu.Unlock()
+			return *of
+		}
+	}
+
+	return redirector, count(&hits), count(&calls)
+}
+
+func TestRedirectsAreNotFollowed(t *testing.T) {
+	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			server, targetHits, _ := newRedirectServer(t, status)
+			client := newTestClient(t, server.URL)
+
+			session, err := client.CreateCheckoutSession(context.Background(), testParams())
+			if session != nil {
+				t.Fatal("a redirect target's response must never be returned as a session")
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("got %v, want *APIError", err)
+			}
+			if apiErr.HTTPStatus != status {
+				t.Fatalf("got HTTPStatus %d, want %d", apiErr.HTTPStatus, status)
+			}
+			if !strings.Contains(apiErr.Error(), "redirect") {
+				t.Fatalf("the message must name the redirect: %s", apiErr.Error())
+			}
+			if got := targetHits(); got != 0 {
+				t.Fatalf("the redirect target was hit %d times; credentials leak on the hop", got)
+			}
+		})
+	}
+}
+
+func TestRedirectsAreNotRetried(t *testing.T) {
+	server, targetHits, attempts := newRedirectServer(t, http.StatusMovedPermanently)
+	client := newTestClient(t, server.URL)
+
+	_, err := client.CreateCheckoutSessionWithRetry(context.Background(), testParams(), RetryOptions{
+		Attempts:  3,
+		BaseDelay: time.Millisecond,
+	})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("got %v, want *APIError", err)
+	}
+	// The point of the test: a 3xx is not a *TransportError, so the helper must
+	// give up after ONE attempt rather than replaying signed headers at whatever
+	// is answering.
+	if got := attempts(); got != 1 {
+		t.Fatalf("the API was called %d times, want 1; a redirect must not be retried", got)
+	}
+	if got := targetHits(); got != 0 {
+		t.Fatalf("the redirect target was hit %d times; credentials leak on the hop", got)
+	}
+}
+
+func TestRedirectsAreNotFollowedWithACustomHTTPClient(t *testing.T) {
+	server, targetHits, _ := newRedirectServer(t, http.StatusFound)
+	custom := &http.Client{Timeout: 5 * time.Second}
+
+	client, err := New(testKeyID, vector.Secret, WithBaseURL(server.URL), WithHTTPClient(custom))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, err := client.CreateCheckoutSession(context.Background(), testParams()); err == nil {
+		t.Fatal("want an error, got none")
+	}
+	if got := targetHits(); got != 0 {
+		t.Fatalf("the redirect target was hit %d times; credentials leak on the hop", got)
+	}
+	if custom.CheckRedirect != nil {
+		t.Fatal("the caller's own client must not be modified")
+	}
+}
+
+func TestClientNeverPrintsTheSecret(t *testing.T) {
+	client := newTestClient(t, "https://example.test")
+
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+		for name, printed := range map[string]string{
+			"value":   fmt.Sprintf(verb, *client),
+			"pointer": fmt.Sprintf(verb, client),
+		} {
+			if strings.Contains(printed, vector.Secret) {
+				t.Fatalf("%s on a %s leaked the secret: %s", verb, name, printed)
+			}
+			// A prefix of the secret is still the secret.
+			if strings.Contains(printed, vector.Secret[:12]) {
+				t.Fatalf("%s on a %s leaked part of the secret: %s", verb, name, printed)
+			}
+			if !strings.Contains(printed, "redacted") {
+				t.Fatalf("%s on a %s does not say the secret was redacted: %s", verb, name, printed)
+			}
+			if !strings.Contains(printed, testKeyID) {
+				t.Fatalf("%s on a %s dropped the key id: %s", verb, name, printed)
+			}
+		}
 	}
 }
