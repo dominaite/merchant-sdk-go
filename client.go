@@ -187,13 +187,7 @@ func (c *Client) CreateCheckoutSession(ctx context.Context, params CreateCheckou
 		return nil, err
 	}
 
-	var envelope struct {
-		Success       *bool           `json:"success"`
-		Checkout      json.RawMessage `json:"checkout"`
-		TransactionID string          `json:"transactionId"`
-		ErrorCode     string          `json:"errorCode"`
-		ErrorMessage  string          `json:"errorMessage"`
-	}
+	var envelope checkoutSessionEnvelope
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return nil, newAPIError(http.StatusOK, "The API returned an unexpected create-session response")
 	}
