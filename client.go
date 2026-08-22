@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -436,7 +437,15 @@ func prepareSessionRequest(params CreateCheckoutSessionParams) (string, string, 
 	if strings.TrimSpace(params.OrderReference) == "" {
 		return "", "", newValidationError("Missing required parameter: orderReference")
 	}
-	if len(params.OrderReference) > 100 {
+	// Characters, not bytes. len() would count UTF-8 bytes and reject a
+	// perfectly valid 60-character Cyrillic or CJK order reference at the
+	// client, before the API ever got a say.
+	//
+	// The server counts UTF-16 code units, so an astral character (emoji, rare
+	// CJK) is one here and two there. The gap only shows up within a few
+	// characters of the limit, and the API stays the final arbiter: when it
+	// disagrees it answers with a 400 the caller already handles.
+	if utf8.RuneCountInString(params.OrderReference) > 100 {
 		return "", "", newValidationError("orderReference must be at most 100 characters")
 	}
 
@@ -448,7 +457,7 @@ func prepareSessionRequest(params CreateCheckoutSessionParams) (string, string, 
 		}
 		idempotencyKey = key
 	}
-	if len(idempotencyKey) > 100 {
+	if utf8.RuneCountInString(idempotencyKey) > 100 {
 		return "", "", newValidationError("idempotencyKey must be a non-empty string of at most 100 characters")
 	}
 

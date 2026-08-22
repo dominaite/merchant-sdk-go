@@ -1,6 +1,7 @@
 package dominaite
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -52,5 +53,50 @@ func TestDefaultBaseURLIsHTTPS(t *testing.T) {
 	}
 	if _, err := New(testKeyID, vector.Secret); err != nil {
 		t.Fatalf("New with the default base URL: %v", err)
+	}
+}
+
+// Length limits are in characters, the unit merchants and the dashboard use.
+// Counting bytes would reject a valid 100-character Cyrillic reference at 200
+// bytes, before the API ever saw it.
+func TestLengthLimitsCountCharactersNotBytes(t *testing.T) {
+	server, calls := newTestServer(t, successReply())
+	client := newTestClient(t, server.URL)
+
+	cyrillic := strings.Repeat("б", 100) // 100 characters, 200 bytes
+	params := testParams()
+	params.OrderReference = cyrillic
+
+	if _, err := client.CreateCheckoutSession(context.Background(), params); err != nil {
+		t.Fatalf("a 100-character Cyrillic orderReference must be accepted: %v", err)
+	}
+	if len(calls()) != 1 {
+		t.Fatal("the request never reached the server")
+	}
+
+	params.OrderReference = strings.Repeat("б", 101)
+	_, err := client.CreateCheckoutSession(context.Background(), params)
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("101 characters: got %v, want *ValidationError", err)
+	}
+}
+
+func TestIdempotencyKeyLimitCountsCharacters(t *testing.T) {
+	server, _ := newTestServer(t, successReply())
+	client := newTestClient(t, server.URL)
+
+	params := testParams()
+	params.IdempotencyKey = strings.Repeat("é", 100) // 100 characters, 200 bytes
+
+	if _, err := client.CreateCheckoutSession(context.Background(), params); err != nil {
+		t.Fatalf("a 100-character idempotency key must be accepted: %v", err)
+	}
+
+	params.IdempotencyKey = strings.Repeat("é", 101)
+	_, err := client.CreateCheckoutSession(context.Background(), params)
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("101 characters: got %v, want *ValidationError", err)
 	}
 }
