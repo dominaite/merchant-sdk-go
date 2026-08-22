@@ -141,6 +141,107 @@ func TestDefaultBaseURLIsHTTPS(t *testing.T) {
 	}
 }
 
+func TestRateLimitErrorCarriesRetryAfter(t *testing.T) {
+	cases := []struct {
+		name       string
+		retryAfter string
+		wantValue  int
+		wantHave   bool
+	}{
+		{name: "integer seconds", retryAfter: "30", wantValue: 30, wantHave: true},
+		{name: "zero seconds", retryAfter: "0", wantValue: 0, wantHave: true},
+		{name: "absent", retryAfter: "", wantValue: 0, wantHave: false},
+		{name: "http date", retryAfter: "Wed, 21 Oct 2026 07:28:00 GMT", wantValue: 0, wantHave: false},
+		{name: "garbage", retryAfter: "soon", wantValue: 0, wantHave: false},
+		{name: "negative", retryAfter: "-5", wantValue: 0, wantHave: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newRawServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if tc.retryAfter != "" {
+					w.Header().Set("Retry-After", tc.retryAfter)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"success":false,"errorCode":"RATE_LIMIT_EXCEEDED"}`))
+			})
+			client := newTestClient(t, server.URL)
+
+			_, err := client.CreateCheckoutSession(context.Background(), testParams())
+
+			var limited *RateLimitError
+			if !errors.As(err, &limited) {
+				t.Fatalf("got %v, want *RateLimitError", err)
+			}
+			if limited.RetryAfterSeconds != tc.wantValue || limited.HasRetryAfter != tc.wantHave {
+				t.Fatalf("RetryAfterSeconds = %d (have %t), want %d (have %t)",
+					limited.RetryAfterSeconds, limited.HasRetryAfter, tc.wantValue, tc.wantHave)
+			}
+			if limited.ErrorCode != "RATE_LIMIT_EXCEEDED" {
+				t.Fatalf("ErrorCode = %q", limited.ErrorCode)
+			}
+
+			// A rate limit is its own thing, not a transport failure and not a
+			// generic 4xx. Callers branch on it to back off.
+			var transportErr *TransportError
+			if errors.As(err, &transportErr) {
+				t.Fatal("a 429 must not be reported as a transport error")
+			}
+			var apiErr *APIError
+			if errors.As(err, &apiErr) {
+				t.Fatal("a 429 must not be reported as a generic APIError")
+			}
+			if !errors.Is(err, ErrDominaite) {
+				t.Fatal("a RateLimitError must match ErrDominaite")
+			}
+		})
+	}
+}
+
+// A non-JSON 429 (the edge rate limiter answers before the API does) still
+// classifies on the status.
+func TestNonJSONRateLimitIsARateLimitError(t *testing.T) {
+	server := newRawServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "12")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("<html>429 Too Many Requests</html>"))
+	})
+	client := newTestClient(t, server.URL)
+
+	_, err := client.CreateCheckoutSession(context.Background(), testParams())
+
+	var limited *RateLimitError
+	if !errors.As(err, &limited) {
+		t.Fatalf("got %v, want *RateLimitError", err)
+	}
+	if limited.RetryAfterSeconds != 12 || !limited.HasRetryAfter {
+		t.Fatalf("RetryAfterSeconds = %d (have %t), want 12 (have true)", limited.RetryAfterSeconds, limited.HasRetryAfter)
+	}
+}
+
+// Retrying into a rate limit makes the queue longer for everyone. The retry
+// helper hands it straight back after one attempt.
+func TestRetryDoesNotRetryARateLimit(t *testing.T) {
+	var calls int
+	server := newRawServer(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"success":false,"errorCode":"RATE_LIMIT_EXCEEDED"}`))
+	})
+	client := newTestClient(t, server.URL)
+
+	_, err := client.CreateCheckoutSessionWithRetry(context.Background(), testParams(), RetryOptions{Attempts: 3})
+
+	var limited *RateLimitError
+	if !errors.As(err, &limited) {
+		t.Fatalf("got %v, want *RateLimitError", err)
+	}
+	if calls != 1 {
+		t.Fatalf("server saw %d calls, want 1", calls)
+	}
+}
+
 // Length limits are in characters, the unit merchants and the dashboard use.
 // Counting bytes would reject a valid 100-character Cyrillic reference at 200
 // bytes, before the API ever saw it.

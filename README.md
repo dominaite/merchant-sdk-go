@@ -444,7 +444,8 @@ Recover through `RefusalError.TransactionID` and `GetStatus` - see
 `CreateCheckoutSessionWithRetry` does that for you: it pins one key up front and reuses it
 across attempts, retrying only `*TransportError` (network failures and 5xx, including
 `MERCHANT_API_UNAVAILABLE`). Refusals and authentication failures are not retried - they will
-not change.
+not change. Rate limits are not retried either: retrying into a full queue only makes it
+longer, so a `*RateLimitError` comes straight back for you to reschedule.
 
 ```go
 session, err := client.CreateCheckoutSessionWithRetry(
@@ -492,7 +493,8 @@ Treat any status you do not recognise as still-open as well: a value the API add
 make you keep polling, never silently close an order that is still live.
 
 Poll after the payer returns to you, or on your order timeout - not in a tight loop; the
-endpoint is rate limited per key.
+endpoint is rate limited at 60 requests per minute per key and 120 per minute per IP. Going
+over returns a `*RateLimitError`.
 
 Both response types also carry `Raw` (`json.RawMessage`) with the unparsed payload, for fields
 the structs do not model yet.
@@ -513,7 +515,8 @@ For the specific kind, use `errors.As` with the concrete pointer type:
 |---|---|---|
 | `*RefusalError` | The API answered with `success: false`. `ErrorCode` carries the reason. | Branch on `ErrorCode`. Do not blind-retry. |
 | `*AuthError` | 401/403. `ErrorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
-| `*TransportError` | Network failure, timeout, or 5xx (`MERCHANT_API_UNAVAILABLE`). Wraps the cause, reachable with `errors.Unwrap`. | Retry with the **same** idempotency key. |
+| `*RateLimitError` | 429. `RetryAfterSeconds` carries the `Retry-After` header when the API sent one as integer seconds; `HasRetryAfter` tells "wait 0s" apart from "the API did not say". | Back off, then reschedule with the **same** idempotency key. The SDK never retries this for you. |
+| `*TransportError` | Network failure, timeout, or 5xx (`MERCHANT_API_UNAVAILABLE`). Wraps the cause, reachable with `errors.Unwrap`. A 5xx classifies on the status, so an HTML or empty error page from an overloaded edge is still retryable. | Retry with the **same** idempotency key. |
 | `*APIError` | Any other rejecting or unexpected response; `HTTPStatus` carries the code. | Inspect. A 3xx means a proxy or a wrong base URL answered with a redirect - the SDK never follows one. A replayed idempotency key does not land here; it comes back as a `*RefusalError`. |
 | `*ValidationError` | Bad arguments (non-positive amount, missing field, malformed key id). | Fix the call; nothing was sent. |
 | `*WebhookVerificationError` | `VerifyWebhook` rejected an inbound delivery; `Reason` carries which check failed. | Answer 400 with no detail. See [Webhooks](#rejections). |

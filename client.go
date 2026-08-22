@@ -234,6 +234,7 @@ func isLoopbackHost(host string) bool {
 // Errors it returns:
 //   - *AuthError: wrong credentials, bad signature, clock off, IP not allowlisted.
 //   - *APIError: an unexpected or rejecting response; inspect HTTPStatus.
+//   - *RateLimitError: HTTP 429; back off, the SDK does not retry it for you.
 //   - *TransportError: network failure or 5xx.
 func (c *Client) Ping(ctx context.Context) (*Ping, error) {
 	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
@@ -259,6 +260,9 @@ func (c *Client) Ping(ctx context.Context) (*Ping, error) {
 //     Fix the config, do not retry.
 //   - *RefusalError: the gateway refused the session; inspect ErrorCode.
 //   - *APIError: an unexpected or rejecting response; inspect HTTPStatus.
+//   - *RateLimitError: HTTP 429; back off and reschedule with the same
+//     idempotency key. Not retried for you, by CreateCheckoutSessionWithRetry
+//     either.
 //   - *TransportError: network failure or 5xx. Safe to retry WITH the same
 //     idempotency key, which is what CreateCheckoutSessionWithRetry does.
 func (c *Client) CreateCheckoutSession(ctx context.Context, params CreateCheckoutSessionParams) (*CheckoutSession, error) {
@@ -350,6 +354,10 @@ func (o RetryOptions) withDefaults() (int, time.Duration, error) {
 //
 // Refusals and authentication failures are returned immediately. They will not
 // change on a retry.
+//
+// Rate limits (*RateLimitError) are returned immediately too. Retrying into a
+// full queue lengthens it; back off for RetryAfterSeconds and reschedule with
+// the same idempotency key.
 func (c *Client) CreateCheckoutSessionWithRetry(ctx context.Context, params CreateCheckoutSessionParams, opts RetryOptions) (*CheckoutSession, error) {
 	attempts, baseDelay, err := opts.withDefaults()
 	if err != nil {
@@ -409,7 +417,8 @@ func (c *Client) CreateCheckoutSessionWithRetry(ctx context.Context, params Crea
 // should make you keep polling, never silently close a live order.
 //
 // Poll after the payer returns to you, or on your order timeout. Not in a tight
-// loop: the endpoint is rate limited per key.
+// loop: the endpoint is rate limited per key (60/min per key, 120/min per IP),
+// and going over returns a *RateLimitError.
 func (c *Client) GetStatus(ctx context.Context, transactionID string) (*CheckoutStatus, error) {
 	normalized := strings.ToLower(strings.TrimSpace(transactionID))
 	if !uuidPattern.MatchString(normalized) {
@@ -569,6 +578,14 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 			fmt.Sprintf("The Dominaite API is unavailable (HTTP %d); retry with the same idempotency key.", resp.StatusCode),
 			nil,
 		)
+	case resp.StatusCode == http.StatusTooManyRequests:
+		rateErr := newRateLimitError(fmt.Sprintf(
+			"Rate limited by the Dominaite API (HTTP %d). Slow down and retry later with the same idempotency key.",
+			resp.StatusCode,
+		))
+		rateErr.ErrorCode = firstNonEmpty(inner.ErrorCode, envelope.Error.code())
+		rateErr.RetryAfterSeconds, rateErr.HasRetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
+		return nil, rateErr
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		code := firstNonEmpty(inner.ErrorCode, envelope.Error.code(), "UNAUTHORIZED")
 		return nil, newAuthError(code, "Authentication failed - check your key id, secret, and server clock.")
@@ -605,6 +622,17 @@ func readLimited(body io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("response body exceeds the %d byte limit", maxResponseBytes)
 	}
 	return raw, nil
+}
+
+// parseRetryAfter reads the Retry-After header. Only the integer-seconds form
+// is reported; the HTTP-date form and anything unparseable come back absent, so
+// a caller can tell "wait 30s" from "the API did not say".
+func parseRetryAfter(header string) (int, bool) {
+	seconds, err := strconv.Atoi(strings.TrimSpace(header))
+	if err != nil || seconds < 0 {
+		return 0, false
+	}
+	return seconds, true
 }
 
 // newIdempotencyKey mints a random v4 UUID. Keys are per-payment, so a fresh one
