@@ -54,6 +54,12 @@ const (
 	Version = "0.1.2"
 
 	defaultTimeout = 45 * time.Second // serverless cold starts hit 10+s on dev; 15s was a coin flip
+
+	// maxResponseBytes caps how much of a response the SDK will read. Real
+	// merchant API payloads are a few kilobytes; anything at this size is a
+	// proxy error page or something hostile, and reading it to the end would
+	// let whatever answered decide how much memory this process uses.
+	maxResponseBytes = 10 << 20 // 10MB
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -525,7 +531,7 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 		))
 	}
 
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := readLimited(resp.Body)
 	if err != nil {
 		return nil, newTransportError("Could not read the Dominaite API response: "+err.Error(), err)
 	}
@@ -570,6 +576,23 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 	}
 
 	return payload, nil
+}
+
+// readLimited reads a response body up to maxResponseBytes. A body that runs
+// past the cap is reported as a transport failure rather than truncated and
+// parsed: a truncated payload is not the response the API sent, and guessing at
+// half of one is worse than retrying.
+func readLimited(body io.Reader) ([]byte, error) {
+	// One byte past the cap, so a body that exactly fills it is still accepted
+	// and only a genuinely oversized one trips.
+	raw, err := io.ReadAll(io.LimitReader(body, maxResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxResponseBytes {
+		return nil, fmt.Errorf("response body exceeds the %d byte limit", maxResponseBytes)
+	}
+	return raw, nil
 }
 
 // newIdempotencyKey mints a random v4 UUID. Keys are per-payment, so a fresh one

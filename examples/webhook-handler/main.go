@@ -54,7 +54,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The RAW bytes, before any decoding. The signature covers exactly these.
-	body, err := io.ReadAll(r.Body)
+	// Cap the read: a real delivery is a few kilobytes, and without a cap
+	// anyone who can reach this endpoint decides how much memory it uses.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
