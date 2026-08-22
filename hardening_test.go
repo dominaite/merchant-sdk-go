@@ -20,6 +20,78 @@ func newRawServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 	return server
 }
 
+// A 5xx from an overloaded edge is often an HTML error page or an empty body,
+// not the API's JSON. It has to stay a retryable transport failure: classifying
+// it on the body would turn a load-balancer blip into a permanent error the
+// caller never retries, and the payment may well have landed.
+func TestNonJSONServerErrorIsRetryable(t *testing.T) {
+	bodies := map[string]string{
+		"html":      "<html><head><title>503 Service Unavailable</title></head><body><h1>503</h1></body></html>",
+		"empty":     "",
+		"plaintext": "upstream connect error or disconnect/reset before headers",
+		"jsonarray": `["not an object"]`,
+	}
+
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			server := newRawServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(body))
+			})
+			client := newTestClient(t, server.URL)
+
+			_, err := client.CreateCheckoutSession(context.Background(), testParams())
+
+			var transportErr *TransportError
+			if !errors.As(err, &transportErr) {
+				t.Fatalf("got %v, want *TransportError", err)
+			}
+			var apiErr *APIError
+			if errors.As(err, &apiErr) {
+				t.Fatal("a non-JSON 503 must not be reported as a permanent APIError")
+			}
+		})
+	}
+}
+
+// The same body on a 200 stays an APIError: there is a real response expected
+// here and nothing to retry.
+func TestNonJSONSuccessIsAnAPIError(t *testing.T) {
+	server := newRawServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<html>hello</html>"))
+	})
+	client := newTestClient(t, server.URL)
+
+	_, err := client.CreateCheckoutSession(context.Background(), testParams())
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("got %v, want *APIError", err)
+	}
+	if apiErr.HTTPStatus != http.StatusOK {
+		t.Fatalf("HTTPStatus = %d, want 200", apiErr.HTTPStatus)
+	}
+}
+
+// A non-JSON 401 is still an auth failure. Whatever the body is, the status is
+// the API saying the credentials did not work.
+func TestNonJSONAuthFailureIsAnAuthError(t *testing.T) {
+	server := newRawServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("<html>401 Unauthorized</html>"))
+	})
+	client := newTestClient(t, server.URL)
+
+	_, err := client.CreateCheckoutSession(context.Background(), testParams())
+
+	var authErr *AuthError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("got %v, want *AuthError", err)
+	}
+}
+
 func TestBaseURLMustBeHTTPS(t *testing.T) {
 	allowed := []string{
 		"https://api.example.test/payments",

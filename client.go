@@ -538,13 +538,17 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 
 	// The gateway wraps responses as { success, data, ... }; unwrap when present.
 	// Error responses carry the machine-readable code at error.code.
+	//
+	// Parsing is BEST EFFORT and the status is judged on its own below. An
+	// overloaded edge answers 503 with an HTML error page or nothing at all,
+	// and that has to stay a retryable transport failure - deciding "non-JSON,
+	// therefore a permanent API error" would turn every load-balancer blip
+	// into a lost payment the caller never retries.
 	var envelope struct {
 		Data  json.RawMessage `json:"data"`
 		Error *envelopeError  `json:"error"`
 	}
-	if err := json.Unmarshal(raw, &envelope); err != nil || !isJSONObject(raw) {
-		return nil, newAPIError(resp.StatusCode, "The API returned a non-JSON response")
-	}
+	parsedJSON := isJSONObject(raw) && json.Unmarshal(raw, &envelope) == nil
 
 	payload := json.RawMessage(raw)
 	if isJSONObject(envelope.Data) {
@@ -555,17 +559,19 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 		ErrorCode    string `json:"errorCode"`
 		ErrorMessage string `json:"errorMessage"`
 	}
-	_ = json.Unmarshal(payload, &inner)
+	if parsedJSON {
+		_ = json.Unmarshal(payload, &inner)
+	}
 
 	switch {
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		code := firstNonEmpty(inner.ErrorCode, envelope.Error.code(), "UNAUTHORIZED")
-		return nil, newAuthError(code, "Authentication failed - check your key id, secret, and server clock.")
 	case resp.StatusCode >= 500:
 		return nil, newTransportError(
 			fmt.Sprintf("The Dominaite API is unavailable (HTTP %d); retry with the same idempotency key.", resp.StatusCode),
 			nil,
 		)
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		code := firstNonEmpty(inner.ErrorCode, envelope.Error.code(), "UNAUTHORIZED")
+		return nil, newAuthError(code, "Authentication failed - check your key id, secret, and server clock.")
 	case resp.StatusCode >= 400:
 		message := firstNonEmpty(inner.ErrorMessage, envelope.Error.message(), "Request rejected")
 		apiErr := newAPIError(resp.StatusCode, message)
@@ -573,6 +579,12 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 		// do; carry it so callers branch on the code, not on the message text.
 		apiErr.ErrorCode = firstNonEmpty(inner.ErrorCode, envelope.Error.code())
 		return nil, apiErr
+	}
+
+	// A 2xx has to be real JSON: the callers unmarshal it into a session, a
+	// status or a ping, and there is nothing to retry.
+	if !parsedJSON {
+		return nil, newAPIError(resp.StatusCode, "The API returned a non-JSON response")
 	}
 
 	return payload, nil
