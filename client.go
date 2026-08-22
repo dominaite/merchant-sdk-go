@@ -30,11 +30,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -52,6 +54,12 @@ const (
 	Version = "0.1.2"
 
 	defaultTimeout = 45 * time.Second // serverless cold starts hit 10+s on dev; 15s was a coin flip
+
+	// maxResponseBytes caps how much of a response the SDK will read. Real
+	// merchant API payloads are a few kilobytes; anything at this size is a
+	// proxy error page or something hostile, and reading it to the end would
+	// let whatever answered decide how much memory this process uses.
+	maxResponseBytes = 10 << 20 // 10MB
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -94,6 +102,11 @@ type Option func(*Client)
 // WithBaseURL points the client at a non-production environment. Trailing
 // slashes are trimmed. Empty values are ignored, so you can pass an unset
 // environment variable straight through and still get production.
+//
+// The URL must be https://. Plain http:// is accepted only for localhost,
+// 127.0.0.1 and ::1, so a local mock server still works; anything else is
+// refused by New with a *ValidationError. Over http:// your API secret's
+// signature, key id and the whole request body travel in clear text.
 func WithBaseURL(baseURL string) Option {
 	return func(c *Client) {
 		if trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/"); trimmed != "" {
@@ -140,7 +153,8 @@ func WithUserAgent(userAgent string) Option {
 // New builds a client from your API key id (dmk_...) and secret (dms_...), both
 // from the dashboard's Website integration tab. It returns a *ValidationError
 // when either credential has the wrong prefix, which catches a swapped key id
-// and secret before anything is sent.
+// and secret before anything is sent, and when WithBaseURL was given a
+// non-https URL outside loopback.
 func New(keyID, secret string, opts ...Option) (*Client, error) {
 	if !strings.HasPrefix(keyID, "dmk_") {
 		return nil, newValidationError("keyId must start with dmk_")
@@ -161,6 +175,10 @@ func New(keyID, secret string, opts ...Option) (*Client, error) {
 		opt(client)
 	}
 
+	if err := validateBaseURL(client.baseURL); err != nil {
+		return nil, err
+	}
+
 	// Never follow a redirect. Go strips Authorization-class headers on a
 	// cross-origin hop but keeps ours, so following one would hand X-Signature,
 	// X-Api-Key-Id, X-Timestamp and Idempotency-Key to whatever host the
@@ -173,6 +191,39 @@ func New(keyID, secret string, opts ...Option) (*Client, error) {
 	return client, nil
 }
 
+// validateBaseURL refuses a base URL that would put the signed request on the
+// wire in clear text. Loopback is the one exception, for local mock servers and
+// the SDK's own tests.
+func validateBaseURL(baseURL string) error {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return newValidationError("baseURL is not a valid URL: " + err.Error())
+	}
+
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme == "https" {
+		return nil
+	}
+	if scheme == "http" && isLoopbackHost(parsed.Hostname()) {
+		return nil
+	}
+
+	return newValidationError(
+		"baseURL must use https:// - http:// is allowed only for localhost, 127.0.0.1 and ::1. " +
+			"Anywhere else it would send your key id, signature and request body in clear text.",
+	)
+}
+
+// isLoopbackHost reports whether a hostname is one of the three loopback names
+// the SDK exempts. url.Hostname already strips the brackets from [::1].
+func isLoopbackHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
+}
+
 // Ping verifies your credentials, your signing and your clock without creating
 // anything. Make this your first live call: it isolates the setup problems from
 // the payment ones, so a failure here is the key id, the secret, the signature,
@@ -183,6 +234,7 @@ func New(keyID, secret string, opts ...Option) (*Client, error) {
 // Errors it returns:
 //   - *AuthError: wrong credentials, bad signature, clock off, IP not allowlisted.
 //   - *APIError: an unexpected or rejecting response; inspect HTTPStatus.
+//   - *RateLimitError: HTTP 429; back off, the SDK does not retry it for you.
 //   - *TransportError: network failure or 5xx.
 func (c *Client) Ping(ctx context.Context) (*Ping, error) {
 	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
@@ -208,6 +260,9 @@ func (c *Client) Ping(ctx context.Context) (*Ping, error) {
 //     Fix the config, do not retry.
 //   - *RefusalError: the gateway refused the session; inspect ErrorCode.
 //   - *APIError: an unexpected or rejecting response; inspect HTTPStatus.
+//   - *RateLimitError: HTTP 429; back off and reschedule with the same
+//     idempotency key. Not retried for you, by CreateCheckoutSessionWithRetry
+//     either.
 //   - *TransportError: network failure or 5xx. Safe to retry WITH the same
 //     idempotency key, which is what CreateCheckoutSessionWithRetry does.
 func (c *Client) CreateCheckoutSession(ctx context.Context, params CreateCheckoutSessionParams) (*CheckoutSession, error) {
@@ -299,6 +354,10 @@ func (o RetryOptions) withDefaults() (int, time.Duration, error) {
 //
 // Refusals and authentication failures are returned immediately. They will not
 // change on a retry.
+//
+// Rate limits (*RateLimitError) are returned immediately too. Retrying into a
+// full queue lengthens it; back off for RetryAfterSeconds and reschedule with
+// the same idempotency key.
 func (c *Client) CreateCheckoutSessionWithRetry(ctx context.Context, params CreateCheckoutSessionParams, opts RetryOptions) (*CheckoutSession, error) {
 	attempts, baseDelay, err := opts.withDefaults()
 	if err != nil {
@@ -358,7 +417,8 @@ func (c *Client) CreateCheckoutSessionWithRetry(ctx context.Context, params Crea
 // should make you keep polling, never silently close a live order.
 //
 // Poll after the payer returns to you, or on your order timeout. Not in a tight
-// loop: the endpoint is rate limited per key.
+// loop: the endpoint is rate limited per key (60/min per key, 120/min per IP),
+// and going over returns a *RateLimitError.
 func (c *Client) GetStatus(ctx context.Context, transactionID string) (*CheckoutStatus, error) {
 	normalized := strings.ToLower(strings.TrimSpace(transactionID))
 	if !uuidPattern.MatchString(normalized) {
@@ -392,7 +452,15 @@ func prepareSessionRequest(params CreateCheckoutSessionParams) (string, string, 
 	if strings.TrimSpace(params.OrderReference) == "" {
 		return "", "", newValidationError("Missing required parameter: orderReference")
 	}
-	if len(params.OrderReference) > 100 {
+	// Characters, not bytes. len() would count UTF-8 bytes and reject a
+	// perfectly valid 60-character Cyrillic or CJK order reference at the
+	// client, before the API ever got a say.
+	//
+	// The server counts UTF-16 code units, so an astral character (emoji, rare
+	// CJK) is one here and two there. The gap only shows up within a few
+	// characters of the limit, and the API stays the final arbiter: when it
+	// disagrees it answers with a 400 the caller already handles.
+	if utf8.RuneCountInString(params.OrderReference) > 100 {
 		return "", "", newValidationError("orderReference must be at most 100 characters")
 	}
 
@@ -404,7 +472,7 @@ func prepareSessionRequest(params CreateCheckoutSessionParams) (string, string, 
 		}
 		idempotencyKey = key
 	}
-	if len(idempotencyKey) > 100 {
+	if utf8.RuneCountInString(idempotencyKey) > 100 {
 		return "", "", newValidationError("idempotencyKey must be a non-empty string of at most 100 characters")
 	}
 
@@ -472,20 +540,24 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 		))
 	}
 
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := readLimited(resp.Body)
 	if err != nil {
 		return nil, newTransportError("Could not read the Dominaite API response: "+err.Error(), err)
 	}
 
 	// The gateway wraps responses as { success, data, ... }; unwrap when present.
 	// Error responses carry the machine-readable code at error.code.
+	//
+	// Parsing is BEST EFFORT and the status is judged on its own below. An
+	// overloaded edge answers 503 with an HTML error page or nothing at all,
+	// and that has to stay a retryable transport failure - deciding "non-JSON,
+	// therefore a permanent API error" would turn every load-balancer blip
+	// into a lost payment the caller never retries.
 	var envelope struct {
 		Data  json.RawMessage `json:"data"`
 		Error *envelopeError  `json:"error"`
 	}
-	if err := json.Unmarshal(raw, &envelope); err != nil || !isJSONObject(raw) {
-		return nil, newAPIError(resp.StatusCode, "The API returned a non-JSON response")
-	}
+	parsedJSON := isJSONObject(raw) && json.Unmarshal(raw, &envelope) == nil
 
 	payload := json.RawMessage(raw)
 	if isJSONObject(envelope.Data) {
@@ -496,17 +568,27 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 		ErrorCode    string `json:"errorCode"`
 		ErrorMessage string `json:"errorMessage"`
 	}
-	_ = json.Unmarshal(payload, &inner)
+	if parsedJSON {
+		_ = json.Unmarshal(payload, &inner)
+	}
 
 	switch {
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		code := firstNonEmpty(inner.ErrorCode, envelope.Error.code(), "UNAUTHORIZED")
-		return nil, newAuthError(code, "Authentication failed - check your key id, secret, and server clock.")
 	case resp.StatusCode >= 500:
 		return nil, newTransportError(
 			fmt.Sprintf("The Dominaite API is unavailable (HTTP %d); retry with the same idempotency key.", resp.StatusCode),
 			nil,
 		)
+	case resp.StatusCode == http.StatusTooManyRequests:
+		rateErr := newRateLimitError(fmt.Sprintf(
+			"Rate limited by the Dominaite API (HTTP %d). Slow down and retry later with the same idempotency key.",
+			resp.StatusCode,
+		))
+		rateErr.ErrorCode = firstNonEmpty(inner.ErrorCode, envelope.Error.code())
+		rateErr.RetryAfterSeconds, rateErr.HasRetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
+		return nil, rateErr
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		code := firstNonEmpty(inner.ErrorCode, envelope.Error.code(), "UNAUTHORIZED")
+		return nil, newAuthError(code, "Authentication failed - check your key id, secret, and server clock.")
 	case resp.StatusCode >= 400:
 		message := firstNonEmpty(inner.ErrorMessage, envelope.Error.message(), "Request rejected")
 		apiErr := newAPIError(resp.StatusCode, message)
@@ -516,7 +598,41 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 		return nil, apiErr
 	}
 
+	// A 2xx has to be real JSON: the callers unmarshal it into a session, a
+	// status or a ping, and there is nothing to retry.
+	if !parsedJSON {
+		return nil, newAPIError(resp.StatusCode, "The API returned a non-JSON response")
+	}
+
 	return payload, nil
+}
+
+// readLimited reads a response body up to maxResponseBytes. A body that runs
+// past the cap is reported as a transport failure rather than truncated and
+// parsed: a truncated payload is not the response the API sent, and guessing at
+// half of one is worse than retrying.
+func readLimited(body io.Reader) ([]byte, error) {
+	// One byte past the cap, so a body that exactly fills it is still accepted
+	// and only a genuinely oversized one trips.
+	raw, err := io.ReadAll(io.LimitReader(body, maxResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxResponseBytes {
+		return nil, fmt.Errorf("response body exceeds the %d byte limit", maxResponseBytes)
+	}
+	return raw, nil
+}
+
+// parseRetryAfter reads the Retry-After header. Only the integer-seconds form
+// is reported; the HTTP-date form and anything unparseable come back absent, so
+// a caller can tell "wait 30s" from "the API did not say".
+func parseRetryAfter(header string) (int, bool) {
+	seconds, err := strconv.Atoi(strings.TrimSpace(header))
+	if err != nil || seconds < 0 {
+		return 0, false
+	}
+	return seconds, true
 }
 
 // newIdempotencyKey mints a random v4 UUID. Keys are per-payment, so a fresh one

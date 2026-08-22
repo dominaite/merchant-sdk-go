@@ -11,8 +11,8 @@ import (
 //	if errors.Is(err, dominaite.ErrDominaite) { ... }
 //
 // For the specific kind, use errors.As with *RefusalError, *AuthError,
-// *APIError, *TransportError or *ValidationError, or errors.As with the Error
-// interface to catch any of them while keeping the message.
+// *RateLimitError, *APIError, *TransportError or *ValidationError, or errors.As
+// with the Error interface to catch any of them while keeping the message.
 var ErrDominaite = errors.New("dominaite")
 
 // Error is implemented by every error this SDK returns. It is sealed: only the
@@ -84,6 +84,40 @@ type AuthError struct {
 	ErrorCode string
 }
 
+// RateLimitError means the API answered HTTP 429: you sent requests faster than
+// your allowance. Nothing was created and nothing is wrong with the request.
+//
+// The platform limits are 60 requests per minute per API key and 120 per minute
+// per IP address. Both are enforced, so several keys behind one egress IP share
+// the second budget.
+//
+// The SDK does NOT retry this for you, on purpose. A client that retries into a
+// rate limit makes the queue longer for everyone, and only your code knows
+// whether this payment can wait. CreateCheckoutSessionWithRetry returns it
+// immediately too. When you do retry, reuse the SAME idempotency key: the
+// request may have been rejected at the edge, but that is not guaranteed.
+//
+// RetryAfterSeconds carries the Retry-After header when the API sent one as
+// integer seconds. HasRetryAfter distinguishes "wait 0 seconds" from "the API
+// did not say" - a Retry-After in the HTTP-date form is reported as absent.
+//
+//	var limited *dominaite.RateLimitError
+//	if errors.As(err, &limited) {
+//		wait := 5 * time.Second
+//		if limited.HasRetryAfter {
+//			wait = time.Duration(limited.RetryAfterSeconds) * time.Second
+//		}
+//		// reschedule with the same idempotency key
+//	}
+//
+// ErrorCode is the machine-readable code when the API named one. Empty otherwise.
+type RateLimitError struct {
+	baseError
+	RetryAfterSeconds int
+	HasRetryAfter     bool
+	ErrorCode         string
+}
+
 // APIError means the API answered, but with an unexpected or rejecting response.
 // HTTPStatus carries the code. A 404 from GetStatus means an unknown
 // transaction id. A 3xx means something in front of the API answered with a
@@ -92,7 +126,7 @@ type AuthError struct {
 //
 // A key replayed with a different body does NOT arrive here. The API answers
 // HTTP 200 with success false and IDEMPOTENCY_KEY_REUSED, so it reaches you as
-// a *RefusalError.
+// a *RefusalError. A 429 does not arrive here either: it is a *RateLimitError.
 //
 // ErrorCode is the machine-readable code when the API sent one, so input
 // rejections can be branched on rather than string-matched. A 400 carrying
@@ -131,6 +165,10 @@ func newRefusalError(code, message string) *RefusalError {
 
 func newAuthError(code, message string) *AuthError {
 	return &AuthError{baseError: baseError{Message: message}, ErrorCode: code}
+}
+
+func newRateLimitError(message string) *RateLimitError {
+	return &RateLimitError{baseError: baseError{Message: message}}
 }
 
 func newAPIError(status int, message string) *APIError {
