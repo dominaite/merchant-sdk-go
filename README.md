@@ -414,7 +414,7 @@ event, err := dominaite.VerifyWebhook(
 
 | Option | What |
 |---|---|
-| `WithBaseURL(url)` | Point at a non-production environment. Empty values are ignored, so an unset env var still gives you production. |
+| `WithBaseURL(url)` | Point at a non-production environment. Empty values are ignored, so an unset env var still gives you production. Must be `https://`; plain `http://` is accepted only for `localhost`, `127.0.0.1` and `::1`, and `New` returns a `*ValidationError` for anything else. |
 | `WithTimeout(d)` | Per-request timeout on the default HTTP client. Defaults to 45s (serverless cold starts can take 10+s). |
 | `WithHTTPClient(c)` | Your own `*http.Client`: proxy-aware transport, custom TLS, a test double. Replaces `WithTimeout`. |
 | `WithUserAgent(s)` | Appends your identifier to the SDK's User-Agent, which helps when support reads the access logs. |

@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -94,6 +95,11 @@ type Option func(*Client)
 // WithBaseURL points the client at a non-production environment. Trailing
 // slashes are trimmed. Empty values are ignored, so you can pass an unset
 // environment variable straight through and still get production.
+//
+// The URL must be https://. Plain http:// is accepted only for localhost,
+// 127.0.0.1 and ::1, so a local mock server still works; anything else is
+// refused by New with a *ValidationError. Over http:// your API secret's
+// signature, key id and the whole request body travel in clear text.
 func WithBaseURL(baseURL string) Option {
 	return func(c *Client) {
 		if trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/"); trimmed != "" {
@@ -140,7 +146,8 @@ func WithUserAgent(userAgent string) Option {
 // New builds a client from your API key id (dmk_...) and secret (dms_...), both
 // from the dashboard's Website integration tab. It returns a *ValidationError
 // when either credential has the wrong prefix, which catches a swapped key id
-// and secret before anything is sent.
+// and secret before anything is sent, and when WithBaseURL was given a
+// non-https URL outside loopback.
 func New(keyID, secret string, opts ...Option) (*Client, error) {
 	if !strings.HasPrefix(keyID, "dmk_") {
 		return nil, newValidationError("keyId must start with dmk_")
@@ -161,6 +168,10 @@ func New(keyID, secret string, opts ...Option) (*Client, error) {
 		opt(client)
 	}
 
+	if err := validateBaseURL(client.baseURL); err != nil {
+		return nil, err
+	}
+
 	// Never follow a redirect. Go strips Authorization-class headers on a
 	// cross-origin hop but keeps ours, so following one would hand X-Signature,
 	// X-Api-Key-Id, X-Timestamp and Idempotency-Key to whatever host the
@@ -171,6 +182,39 @@ func New(keyID, secret string, opts ...Option) (*Client, error) {
 	}
 
 	return client, nil
+}
+
+// validateBaseURL refuses a base URL that would put the signed request on the
+// wire in clear text. Loopback is the one exception, for local mock servers and
+// the SDK's own tests.
+func validateBaseURL(baseURL string) error {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return newValidationError("baseURL is not a valid URL: " + err.Error())
+	}
+
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme == "https" {
+		return nil
+	}
+	if scheme == "http" && isLoopbackHost(parsed.Hostname()) {
+		return nil
+	}
+
+	return newValidationError(
+		"baseURL must use https:// - http:// is allowed only for localhost, 127.0.0.1 and ::1. " +
+			"Anywhere else it would send your key id, signature and request body in clear text.",
+	)
+}
+
+// isLoopbackHost reports whether a hostname is one of the three loopback names
+// the SDK exempts. url.Hostname already strips the brackets from [::1].
+func isLoopbackHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
 }
 
 // Ping verifies your credentials, your signing and your clock without creating
