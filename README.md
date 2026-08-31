@@ -436,7 +436,7 @@ in `IdempotencyKey`). Retrying with the same key never opens a second payment - 
 retry with the same key rather than generating a new one.
 
 What a retry does **not** do is hand back the session the first attempt created. If that attempt
-landed, the retry comes back as a `*RefusalError` with a replay code (`DUPLICATE_REQUEST`,
+landed and has not expired, the retry comes back as a `*RefusalError` with a replay code (`DUPLICATE_REQUEST`,
 `ALREADY_PROCESSED`, `PRIOR_ATTEMPT_FAILED`, `IDEMPOTENCY_KEY_REUSED`) and no cashier fields.
 Recover through `RefusalError.TransactionID` and `GetStatus` - see
 [Recovering from a replay refusal](#recovering-from-a-replay-refusal) below.
@@ -459,7 +459,10 @@ The delay doubles each attempt, and a cancelled context stops the wait immediate
 
 ## Sessions expire
 
-A session is valid for 2 hours. If the payer comes back later, create a new session.
+A session is valid for 2 hours. If the payer comes back later, re-POST `CreateCheckoutSession`
+with the same order-derived idempotency key: within a few minutes of expiry that answers
+`DUPLICATE_REQUEST` (retry the same key shortly), and past that it succeeds with a fresh
+session. See [Recovering from a replay refusal](#recovering-from-a-replay-refusal).
 
 ## Status polling (fallback, and the reconciliation sweep)
 
@@ -524,7 +527,8 @@ For the specific kind, use `errors.As` with the concrete pointer type:
 Refusal codes on `RefusalError.ErrorCode`:
 
 - `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; retry later.
-- `DUPLICATE_REQUEST` - a session for this idempotency key is already open.
+- `DUPLICATE_REQUEST` - a session for this idempotency key is already open, or expired within
+  the last few minutes. Re-POST the same key shortly, never a fresh one.
 - `ALREADY_PROCESSED` - this idempotency key's payment already completed.
 - `PRIOR_ATTEMPT_FAILED` - a prior attempt with this key failed terminally; use a fresh key.
 - `IDEMPOTENCY_KEY_REUSED` - same key sent with a different body; use a fresh key.
@@ -547,6 +551,14 @@ if errors.As(err, &refusal) && refusal.TransactionID != "" {
 `RefusalError.TransactionID` is empty when the API did not name one (a concurrent-race
 `DUPLICATE_REQUEST` knows the key is taken but not yet by which row), so check it before use.
 The full refusal payload is on `RefusalError.Raw`.
+
+One replay is not a refusal at all. A session that expired unpaid is superseded: from a few
+minutes past its expiry, re-POSTing the same key returns an ordinary success with a fresh
+session (a new `TransactionID`, same key), so a customer who comes back late just pays. Keep
+the order-derived key for the life of the order to keep that path open. The band is not
+endless - once the platform has independently closed the attempt (about an hour past expiry),
+the replay answers `PRIOR_ATTEMPT_FAILED` and the key is spent; reconcile through `GetStatus`
+and use a fresh key.
 
 ## Verifying your signing
 
