@@ -158,6 +158,43 @@ var Statuses = []string{
 	StatusAbandoned,
 }
 
+// Payment method category values reported in CheckoutStatus.PaymentMethod.
+const (
+	PaymentMethodCard         = "card"
+	PaymentMethodWallet       = "wallet"
+	PaymentMethodBankTransfer = "bank_transfer"
+	PaymentMethodSepa         = "sepa"
+)
+
+// PaymentMethodCategories is every payment method category the merchant API
+// reports, in the gateway's own order.
+//
+// Reporting data, not a money-flow switch: a wallet payment refunds, captures
+// and disputes exactly like a plain card payment.
+var PaymentMethodCategories = []string{
+	PaymentMethodCard,
+	PaymentMethodWallet,
+	PaymentMethodBankTransfer,
+	PaymentMethodSepa,
+}
+
+// Wallet values reported in CheckoutStatus.WalletType.
+const (
+	WalletTypeApplePay   = "apple_pay"
+	WalletTypeGooglePay  = "google_pay"
+	WalletTypeSamsungPay = "samsung_pay"
+)
+
+// WalletTypes is the wallets the gateway currently names in walletType, pinned
+// against the published contract fixture. The field can carry a lower-cased
+// identifier not in this list yet - treat an unknown value as a valid wallet,
+// not an error.
+var WalletTypes = []string{
+	WalletTypeApplePay,
+	WalletTypeGooglePay,
+	WalletTypeSamsungPay,
+}
+
 // checkoutSessionEnvelope is the create-session response as it arrives on the
 // wire. Business refusals come back as HTTP 200 with success false, so the
 // branch is on Success, not on the status code. Checkout is present only on
@@ -181,8 +218,18 @@ type CheckoutStatus struct {
 	Amount         int64  `json:"amount"`
 	Currency       string `json:"currency"`
 	RefundedAmount int64  `json:"refundedAmount,omitempty"`
-	CreatedAt      string `json:"createdAt"`
-	UpdatedAt      string `json:"updatedAt,omitempty"`
+	// PaymentMethod is how the payer paid, one of PaymentMethodCategories.
+	// Empty (null on the wire) while the payment is still open - no method
+	// chosen yet - and on transactions older than the field. Also inside data
+	// on every payment.* webhook event.
+	PaymentMethod string `json:"paymentMethod,omitempty"`
+	// WalletType is which wallet, when PaymentMethod is PaymentMethodWallet.
+	// A value outside WalletTypes is a valid wallet the gateway learned about
+	// after this SDK released, not an error. Empty (null on the wire) for
+	// non-wallet payments. Also inside data on every payment.* webhook event.
+	WalletType string `json:"walletType,omitempty"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt,omitempty"`
 	// ExpiresAt is present while the session is still payable.
 	ExpiresAt string `json:"expiresAt,omitempty"`
 
@@ -240,6 +287,15 @@ type WebhookData struct {
 	// Kind is the movement kind, e.g. "sale". Nullable on the wire; empty
 	// string when absent.
 	Kind string `json:"kind"`
+	// PaymentMethod is how the payer paid, one of PaymentMethodCategories.
+	// Empty (null on the wire) when the payer has not completed payment and on
+	// transactions older than the field.
+	PaymentMethod string `json:"paymentMethod,omitempty"`
+	// WalletType is which wallet, when PaymentMethod is PaymentMethodWallet.
+	// A value outside WalletTypes is a valid wallet the gateway learned about
+	// after this SDK released, not an error. Empty (null on the wire) for
+	// non-wallet payments.
+	WalletType string `json:"walletType,omitempty"`
 
 	// Amount is in MINOR units. For payment.* it is what the merchant is PAID
 	// (the base amount). For payment.refunded it is what was returned to the

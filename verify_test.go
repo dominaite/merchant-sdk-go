@@ -119,6 +119,22 @@ func TestVerifyWebhookKeepsNilSurchargeDistinctFromZero(t *testing.T) {
 	}
 }
 
+// The wallet reporting fields ride the webhook data payload too. Nullable on
+// the wire: a null must land as an empty string, never as an error.
+func TestVerifyWebhookCarriesWalletReportingFields(t *testing.T) {
+	body := `{"id":"a","type":"payment.succeeded","data":{"amount":100,"paymentMethod":"wallet","walletType":"apple_pay"}}`
+	event := mustVerify(t, body)
+	if event.Data.PaymentMethod != PaymentMethodWallet || event.Data.WalletType != WalletTypeApplePay {
+		t.Fatalf("paymentMethod %q, walletType %q, want wallet/apple_pay", event.Data.PaymentMethod, event.Data.WalletType)
+	}
+
+	body = `{"id":"a","type":"payment.succeeded","data":{"amount":100,"paymentMethod":null,"walletType":null}}`
+	event = mustVerify(t, body)
+	if event.Data.PaymentMethod != "" || event.Data.WalletType != "" {
+		t.Fatalf("null wallet fields became %q and %q, want empty strings", event.Data.PaymentMethod, event.Data.WalletType)
+	}
+}
+
 // mustVerify signs an arbitrary body with the vector secret and verifies it.
 func mustVerify(t *testing.T, body string) *WebhookEvent {
 	t.Helper()

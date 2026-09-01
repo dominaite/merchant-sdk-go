@@ -50,8 +50,9 @@ const (
 	// PingPath is the credentials-and-clock smoke test. It creates nothing.
 	PingPath = "/merchant-api/ping"
 
-	// Version is this SDK's version, reported in the User-Agent.
-	Version = "0.1.2"
+	// Version is this SDK's version, reported in the User-Agent. Release tags
+	// must track it - pinned by the User-Agent test in client_test.go.
+	Version = "0.3.0"
 
 	defaultTimeout = 45 * time.Second // serverless cold starts hit 10+s on dev; 15s was a coin flip
 

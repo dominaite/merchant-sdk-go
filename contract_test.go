@@ -388,6 +388,10 @@ func TestGetStatusResponseMatchesContract(t *testing.T) {
 	if status.CreatedAt != "2026-08-21T09:15:30.000Z" || status.UpdatedAt != "2026-08-21T09:16:05.000Z" {
 		t.Errorf("createdAt %q, updatedAt %q", status.CreatedAt, status.UpdatedAt)
 	}
+	if status.PaymentMethod != PaymentMethodWallet || status.WalletType != WalletTypeApplePay {
+		t.Errorf("paymentMethod %q, walletType %q, want %q/%q",
+			status.PaymentMethod, status.WalletType, PaymentMethodWallet, WalletTypeApplePay)
+	}
 	// Nulls must land as zero values, never as the string "null" or an error.
 	if status.RefundedAmount != 0 {
 		t.Errorf("RefundedAmount = %d, want 0 for a null", status.RefundedAmount)
