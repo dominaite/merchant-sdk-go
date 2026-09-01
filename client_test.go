@@ -330,6 +330,25 @@ func TestPingSignsEmptyKeyAndEmptyBodyOnTheCanonicalPath(t *testing.T) {
 	}
 }
 
+// The User-Agent must carry the package's Version const, so a hardcoded
+// identifier cannot silently outlive a release bump.
+func TestUserAgentCarriesTheSDKVersion(t *testing.T) {
+	server, calls := newTestServer(t, reply{Body: map[string]any{
+		"success": true,
+		"data":    map[string]any{"pong": true, "merchantId": "mer_1", "clockSkewSeconds": 0},
+	}})
+	client := newTestClient(t, server.URL)
+
+	if _, err := client.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+
+	ua := calls()[0].Header.Get("User-Agent")
+	if !strings.HasPrefix(ua, "dominaite-go/"+Version+" ") {
+		t.Fatalf("User-Agent %q must carry Version %s - keep the const in client.go in sync with the release tag", ua, Version)
+	}
+}
+
 func TestPingAuthFailureKeepsTheErrorTaxonomy(t *testing.T) {
 	server, _ := newTestServer(t, reply{Status: http.StatusUnauthorized, Body: map[string]any{"errorCode": "IP_NOT_ALLOWED"}})
 	client := newTestClient(t, server.URL)
