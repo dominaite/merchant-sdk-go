@@ -262,6 +262,13 @@ Options: `WithWebhookTolerance(d)` changes the freshness window from its 300 sec
 (`dominaite.DefaultWebhookTolerance`), and `WithWebhookClock(fn)` replaces the clock so tests
 can verify a recorded delivery at a fixed instant.
 
+`event.Data` carries the fields you need to act on the delivery without a status call:
+`OrderReference` (your own order id from create session, the field to match on),
+`OrderID`, `Description`, `PaymentMethod`, `WalletType`, `PaymentMethodBrand` and
+`PaymentMethodLast4`, next to the amounts and statuses. Nullable wire fields arrive as empty
+strings; `payment.refunded` carries the original payment's `OrderReference`. Anything not
+modelled is in `event.Data.Raw`.
+
 There is no way to switch the freshness check off. `WithWebhookTolerance(0)` is the strictest
 setting, not an off switch: it requires `t` to equal your clock to the second, which rejects
 anything that spent time in flight. A negative duration is refused with `INVALID_TOLERANCE`.

@@ -105,6 +105,25 @@ func TestVerifyWebhookAcceptsCanonicalVector(t *testing.T) {
 
 // A nil surcharge must stay distinct from a zero surcharge: "we do not know"
 // and "there was none" are different facts about the money.
+func TestVerifyWebhookParsesIdentificationFields(t *testing.T) {
+	// Gateway #3095 added these keys. The canonical vector predates them, so
+	// its body must still parse (empty strings), and a current delivery must
+	// surface them.
+	event := mustVerify(t, webhookVector.Body)
+	if event.Data.OrderReference != "" || event.Data.OrderID != "" || event.Data.Description != "" {
+		t.Fatalf("pre-#3095 body must leave identification fields empty, got %+v", event.Data)
+	}
+
+	body := `{"id":"7f9c24e5-1d1f-4c0a-9b6c-2f3a4d5e6f70","type":"payment.succeeded","createdAt":"2026-08-20T14:00:00Z","data":{"transactionId":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","orderReference":"order-42","orderId":"dom_0f1e2d3c4b5a69788796a5b4c3d2e1f0","description":"Pro plan","status":"succeeded","previousStatus":"pending","kind":"sale","amount":8440,"grossAmount":8701,"surchargeAmount":261,"currency":"EUR","paymentMethod":"card","walletType":null,"paymentMethodBrand":"visa","paymentMethodLast4":"4242","originalTransactionId":null,"idempotencyKey":"order-123"}}`
+	event = mustVerify(t, body)
+	if event.Data.OrderReference != "order-42" || event.Data.OrderID != "dom_0f1e2d3c4b5a69788796a5b4c3d2e1f0" || event.Data.Description != "Pro plan" {
+		t.Errorf("identification fields = %q %q %q", event.Data.OrderReference, event.Data.OrderID, event.Data.Description)
+	}
+	if event.Data.PaymentMethod != "card" || event.Data.WalletType != "" || event.Data.PaymentMethodBrand != "visa" || event.Data.PaymentMethodLast4 != "4242" {
+		t.Errorf("payment method fields = %q %q %q %q", event.Data.PaymentMethod, event.Data.WalletType, event.Data.PaymentMethodBrand, event.Data.PaymentMethodLast4)
+	}
+}
+
 func TestVerifyWebhookKeepsNilSurchargeDistinctFromZero(t *testing.T) {
 	body := `{"id":"a","type":"payment.succeeded","data":{"amount":100,"surchargeAmount":null}}`
 	event := mustVerify(t, body)
