@@ -232,6 +232,16 @@ type WebhookEvent struct {
 // WebhookData is the payload of a WebhookEvent.
 type WebhookData struct {
 	TransactionID string `json:"transactionId"`
+	// OrderReference is your own order id, as sent on create session. Match a
+	// delivery to your order on this field. Empty only for payments that did not
+	// start through the API; payment.refunded carries the original payment's.
+	OrderReference string `json:"orderReference"`
+	// OrderID is the hosted checkout order id, the same value the status GET
+	// returns. Empty on refunds and reversals.
+	OrderID string `json:"orderId"`
+	// Description is the description sent on create session. Empty when none
+	// was given and on refunds and reversals.
+	Description string `json:"description"`
 	// Status is the wire status of the row, one of the Status* constants.
 	Status string `json:"status"`
 	// PreviousStatus is the status the row moved from. Nullable on the wire;
@@ -253,6 +263,19 @@ type WebhookData struct {
 	SurchargeAmount *int64 `json:"surchargeAmount"`
 	// Currency is ISO 4217.
 	Currency string `json:"currency"`
+
+	// PaymentMethod is how the payer paid: card, wallet, bank_transfer or sepa.
+	// Empty while the payment is still open.
+	PaymentMethod string `json:"paymentMethod"`
+	// WalletType names the wallet when PaymentMethod is wallet (apple_pay,
+	// google_pay, ...). Empty for non-wallet payments.
+	WalletType string `json:"walletType"`
+	// PaymentMethodBrand is the lower-cased card brand (visa, mastercard, ...)
+	// once a card payment was attempted. Empty otherwise.
+	PaymentMethodBrand string `json:"paymentMethodBrand"`
+	// PaymentMethodLast4 is the card's last four digits once a card payment was
+	// attempted. Empty otherwise.
+	PaymentMethodLast4 string `json:"paymentMethodLast4"`
 
 	// OriginalTransactionID is the parent transaction for refunds and
 	// reversals. Empty on an original payment.
