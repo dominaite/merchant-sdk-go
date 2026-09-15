@@ -10,9 +10,10 @@ import (
 //
 //	if errors.Is(err, dominaite.ErrDominaite) { ... }
 //
-// For the specific kind, use errors.As with *RefusalError, *AuthError,
-// *RateLimitError, *APIError, *TransportError or *ValidationError, or errors.As
-// with the Error interface to catch any of them while keeping the message.
+// For the specific kind, use errors.As with *RefusalError, *ChargeError,
+// *RevokeError, *AuthError, *RateLimitError, *APIError, *TransportError or
+// *ValidationError, or errors.As with the Error interface to catch any of them
+// while keeping the message.
 var ErrDominaite = errors.New("dominaite")
 
 // Error is implemented by every error this SDK returns. It is sealed: only the
@@ -118,9 +119,116 @@ type RateLimitError struct {
 	ErrorCode         string
 }
 
+// Charge error codes, in the gateway's own order: the codes ChargePaymentMethod
+// returns as a *ChargeError. CHARGE_DECLINED (HTTP 402) is deliberately not one
+// of them: a decline is a charge result with Status ChargeStatusFailed, not an
+// error.
+const (
+	// ChargeErrorPaymentMethodNotActive (409): the method is revoked or
+	// expired; ask the customer for another card via a hosted session with
+	// SaveCard.
+	ChargeErrorPaymentMethodNotActive = "PAYMENT_METHOD_NOT_ACTIVE"
+	// ChargeErrorDuplicateRequest (409): a request with this key is still in
+	// flight; retry with the SAME key in a moment.
+	ChargeErrorDuplicateRequest = "DUPLICATE_REQUEST"
+	// ChargeErrorIdempotencyKeyReused (422): same key, different body or
+	// method; a bug on your side.
+	ChargeErrorIdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED"
+	// ChargeErrorOutcomeUnknown (502): the provider gave no verdict and the
+	// charge MAY have happened. Charge is set: poll
+	// GetStatus(Charge.TransactionID) or wait for the webhook. Never retry
+	// under a new key.
+	ChargeErrorOutcomeUnknown = "CHARGE_OUTCOME_UNKNOWN"
+	// ChargeErrorFailed (502): nothing was charged. Charge is set when a row
+	// exists (its DeclineClass and DeclineCode are empty), nil when the
+	// provider refused before one.
+	ChargeErrorFailed = "CHARGE_FAILED"
+	// ChargeErrorChargesDisabled (503): nothing was charged; retry later with
+	// the SAME key.
+	ChargeErrorChargesDisabled = "PAYMENT_METHOD_CHARGES_DISABLED"
+	// ChargeErrorProcessingUnavailable (503): nothing was charged; retry later
+	// with the SAME key.
+	ChargeErrorProcessingUnavailable = "PAYMENT_PROCESSING_UNAVAILABLE"
+)
+
+// ChargeErrorCodes is the complete v1 vocabulary of ChargeError.ErrorCode.
+// Unknown codes still arrive as a *ChargeError; branch on the ones you know.
+var ChargeErrorCodes = []string{
+	ChargeErrorPaymentMethodNotActive,
+	ChargeErrorDuplicateRequest,
+	ChargeErrorIdempotencyKeyReused,
+	ChargeErrorOutcomeUnknown,
+	ChargeErrorFailed,
+	ChargeErrorChargesDisabled,
+	ChargeErrorProcessingUnavailable,
+}
+
+// ChargeError means the gateway answered a charge with an error code instead
+// of a charge result: HTTP 409, 422, 502 or 503 with one of the ChargeError*
+// codes on ErrorCode (see each constant for what to do). HTTPStatus carries
+// the status, Message the gateway's own text.
+//
+// Charge is the charge row the gateway attached to its answer, when it did:
+// always for CHARGE_OUTCOME_UNKNOWN, sometimes for CHARGE_FAILED, never for
+// the rest. TransactionID is a shortcut for Charge.TransactionID, empty when
+// there is no charge:
+//
+//	charge, err := client.ChargePaymentMethod(ctx, id, params)
+//	var chargeErr *dominaite.ChargeError
+//	if errors.As(err, &chargeErr) && chargeErr.ErrorCode == dominaite.ChargeErrorOutcomeUnknown {
+//		// poll client.GetStatus(ctx, chargeErr.TransactionID); do not retry under a new key
+//	}
+//
+// Only authentication (401/403, *AuthError), an id that is not yours (404,
+// *APIError), validation (400, *APIError), rate limiting (429,
+// *RateLimitError) and network failures or a 5xx without a code
+// (*TransportError) keep their generic errors on this route.
+type ChargeError struct {
+	baseError
+	HTTPStatus int
+	ErrorCode  string
+	// Charge is the charge row the gateway attached to its answer, when it did.
+	Charge *PaymentMethodCharge
+	// TransactionID is Charge.TransactionID, for polling GetStatus. Empty
+	// without a charge.
+	TransactionID string
+	// Raw is the whole envelope the gateway sent, for fields not modelled above.
+	Raw json.RawMessage
+}
+
+// Revoke error codes, in the gateway's own order: the codes RevokePaymentMethod
+// returns as a *RevokeError. Nothing changed under either.
+const (
+	// RevokeErrorUpstreamContract (502): the provider refused the deletion for
+	// a reason a retry will not fix; contact support with the payment method id.
+	RevokeErrorUpstreamContract = "UPSTREAM_CONTRACT_ERROR"
+	// RevokeErrorMerchantAPIUnavailable (503): the provider is unavailable or
+	// throttling; retry later.
+	RevokeErrorMerchantAPIUnavailable = "MERCHANT_API_UNAVAILABLE"
+)
+
+// RevokeErrorCodes is the complete v1 vocabulary of RevokeError.ErrorCode.
+var RevokeErrorCodes = []string{
+	RevokeErrorUpstreamContract,
+	RevokeErrorMerchantAPIUnavailable,
+}
+
+// RevokeError means the gateway refused to revoke a stored payment method:
+// HTTP 502 or 503 with one of the RevokeError* codes on ErrorCode. Nothing
+// changed either way. An id that is not yours is still the generic *APIError
+// with HTTPStatus 404.
+type RevokeError struct {
+	baseError
+	HTTPStatus int
+	ErrorCode  string
+	// Raw is the whole envelope the gateway sent, for fields not modelled above.
+	Raw json.RawMessage
+}
+
 // APIError means the API answered, but with an unexpected or rejecting response.
 // HTTPStatus carries the code. A 404 from GetStatus means an unknown
-// transaction id. A 3xx means something in front of the API answered with a
+// transaction id; a 404 from ChargePaymentMethod or RevokePaymentMethod an id
+// that is not yours. A 3xx means something in front of the API answered with a
 // redirect: the SDK never follows one and never treats its body as a real
 // response, because the API itself does not redirect.
 //
@@ -161,6 +269,18 @@ type ValidationError struct {
 
 func newRefusalError(code, message string) *RefusalError {
 	return &RefusalError{baseError: baseError{Message: message}, ErrorCode: code}
+}
+
+func newChargeError(status int, code, message string, charge *PaymentMethodCharge, raw json.RawMessage) *ChargeError {
+	chargeErr := &ChargeError{baseError: baseError{Message: message}, HTTPStatus: status, ErrorCode: code, Charge: charge, Raw: raw}
+	if charge != nil {
+		chargeErr.TransactionID = charge.TransactionID
+	}
+	return chargeErr
+}
+
+func newRevokeError(status int, code, message string, raw json.RawMessage) *RevokeError {
+	return &RevokeError{baseError: baseError{Message: message}, HTTPStatus: status, ErrorCode: code, Raw: raw}
 }
 
 func newAuthError(code, message string) *AuthError {

@@ -17,29 +17,42 @@ import (
 // fixture. The fixture only moves after the matching gateway DTO change lands.
 const contractPath = "testdata/merchant-api-contract.json"
 
+// errorExample is one of the fixture's error bodies: the HTTP status the
+// gateway answers with, the code at error.code, and the whole envelope.
+type errorExample struct {
+	HTTPStatus int             `json:"httpStatus"`
+	Code       string          `json:"code"`
+	Body       json.RawMessage `json:"body"`
+}
+
 type endpointContract struct {
-	Method              string          `json:"method"`
-	Path                string          `json:"path"`
-	HTTPStatus          int             `json:"httpStatus"`
-	Fields              []string        `json:"fields"`
-	CheckoutFields      []string        `json:"checkoutFields"`
-	PaymentMethodFields []string        `json:"paymentMethodFields"`
-	Example             json.RawMessage `json:"example"`
-	SavedCardExample    json.RawMessage `json:"savedCardExample"`
-	SuccessExample      json.RawMessage `json:"successExample"`
-	DeclinedExample     json.RawMessage `json:"declinedExample"`
-	RefusalExample      json.RawMessage `json:"refusalExample"`
+	Method                    string          `json:"method"`
+	Path                      string          `json:"path"`
+	HTTPStatus                int             `json:"httpStatus"`
+	DeclinedHTTPStatus        int             `json:"declinedHttpStatus"`
+	Fields                    []string        `json:"fields"`
+	CheckoutFields            []string        `json:"checkoutFields"`
+	StoredPaymentMethodFields []string        `json:"storedPaymentMethodFields"`
+	Example                   json.RawMessage `json:"example"`
+	SavedCardExample          json.RawMessage `json:"savedCardExample"`
+	SuccessExample            json.RawMessage `json:"successExample"`
+	DeclinedExample           json.RawMessage `json:"declinedExample"`
+	RefusalExample            json.RawMessage `json:"refusalExample"`
+	ErrorExamples             []errorExample  `json:"errorExamples"`
+	NotFoundExample           *errorExample   `json:"notFoundExample"`
 }
 
 type responseContract struct {
-	Version                       string   `json:"version"`
-	StatusVocabulary              []string `json:"statusVocabulary"`
-	PaymentMethodStatusVocabulary []string `json:"paymentMethodStatusVocabulary"`
-	ChargeStatusVocabulary        []string `json:"chargeStatusVocabulary"`
-	DeclineClassVocabulary        []string `json:"declineClassVocabulary"`
-	SessionRefusalErrorCodes      []string `json:"sessionRefusalErrorCodes"`
-	ValidationErrorCodes          []string `json:"validationErrorCodes"`
-	Endpoints                     struct {
+	Version                             string   `json:"version"`
+	StatusVocabulary                    []string `json:"statusVocabulary"`
+	StoredPaymentMethodStatusVocabulary []string `json:"storedPaymentMethodStatusVocabulary"`
+	ChargeStatusVocabulary              []string `json:"chargeStatusVocabulary"`
+	DeclineClassVocabulary              []string `json:"declineClassVocabulary"`
+	SessionRefusalErrorCodes            []string `json:"sessionRefusalErrorCodes"`
+	ValidationErrorCodes                []string `json:"validationErrorCodes"`
+	ChargeErrorCodes                    []string `json:"chargeErrorCodes"`
+	RevokeErrorCodes                    []string `json:"revokeErrorCodes"`
+	Endpoints                           struct {
 		Ping                  endpointContract `json:"ping"`
 		CreateCheckoutSession endpointContract `json:"createCheckoutSession"`
 		GetStatus             endpointContract `json:"getStatus"`
@@ -406,14 +419,61 @@ func TestGetStatusResponseMatchesContract(t *testing.T) {
 	}
 }
 
-// The stored payment method and its status vocabulary, exactly as the contract
-// lists them, in the gateway's order.
-func TestPaymentMethodMatchesContract(t *testing.T) {
+// withoutNulls is the wire form of a fixture example: the fixture spells
+// nullable fields out as null, the gateway omits them (System.Text.Json with
+// WhenWritingNull). Every example is pushed through in both forms, and the SDK
+// must read them identically.
+func withoutNulls(t *testing.T, raw json.RawMessage) json.RawMessage {
+	t.Helper()
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	stripped, err := json.Marshal(stripNulls(value))
+	if err != nil {
+		t.Fatalf("re-encode: %v", err)
+	}
+	return stripped
+}
+
+func stripNulls(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := map[string]any{}
+		for key, item := range typed {
+			if item == nil {
+				continue
+			}
+			out[key] = stripNulls(item)
+		}
+		return out
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, stripNulls(item))
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+// bothWireForms runs a subtest with the example as spelled and as it goes over
+// the wire.
+func bothWireForms(t *testing.T, example json.RawMessage, run func(t *testing.T, body json.RawMessage)) {
+	t.Helper()
+	t.Run("as spelled", func(t *testing.T) { run(t, example) })
+	t.Run("on the wire", func(t *testing.T) { run(t, withoutNulls(t, example)) })
+}
+
+// The stored payment method, its status vocabulary and the charge and revoke
+// vocabularies, exactly as the contract lists them, in the gateway's order.
+func TestStoredPaymentMethodMatchesContract(t *testing.T) {
 	contract := loadContract(t)
 
-	assertSameFields(t, "PaymentMethod", jsonFieldNames(t, PaymentMethod{}), contract.Endpoints.GetStatus.PaymentMethodFields)
-	if !reflect.DeepEqual(PaymentMethodStatuses, contract.PaymentMethodStatusVocabulary) {
-		t.Errorf("PaymentMethodStatuses = %v, contract says %v", PaymentMethodStatuses, contract.PaymentMethodStatusVocabulary)
+	assertSameFields(t, "StoredPaymentMethod", jsonFieldNames(t, StoredPaymentMethod{}), contract.Endpoints.GetStatus.StoredPaymentMethodFields)
+	if !reflect.DeepEqual(StoredPaymentMethodStatuses, contract.StoredPaymentMethodStatusVocabulary) {
+		t.Errorf("StoredPaymentMethodStatuses = %v, contract says %v", StoredPaymentMethodStatuses, contract.StoredPaymentMethodStatusVocabulary)
 	}
 }
 
@@ -426,34 +486,111 @@ func TestChargeVocabulariesMatchContract(t *testing.T) {
 	if !reflect.DeepEqual(DeclineClasses, contract.DeclineClassVocabulary) {
 		t.Errorf("DeclineClasses = %v, contract says %v", DeclineClasses, contract.DeclineClassVocabulary)
 	}
+	if !reflect.DeepEqual(ChargeErrorCodes, contract.ChargeErrorCodes) {
+		t.Errorf("ChargeErrorCodes = %v, contract says %v", ChargeErrorCodes, contract.ChargeErrorCodes)
+	}
+	if !reflect.DeepEqual(RevokeErrorCodes, contract.RevokeErrorCodes) {
+		t.Errorf("RevokeErrorCodes = %v, contract says %v", RevokeErrorCodes, contract.RevokeErrorCodes)
+	}
+	if contains(ChargeErrorCodes, "CHARGE_DECLINED") {
+		t.Error("CHARGE_DECLINED is a result, never a charge error code")
+	}
+}
+
+// Without a saved card the fixture spells storedPaymentMethod out as null and
+// the wire omits it; both read as nil.
+func TestGetStatusWithoutASavedCardMatchesContract(t *testing.T) {
+	contract := loadContract(t)
+	endpoint := contract.Endpoints.GetStatus
+
+	bothWireForms(t, endpoint.Example, func(t *testing.T, body json.RawMessage) {
+		server, _ := newTestServer(t, reply{Body: string(body)})
+		status, err := newTestClient(t, server.URL).GetStatus(context.Background(), "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0")
+		if err != nil {
+			t.Fatalf("the contract's status example must parse: %v", err)
+		}
+		if status.StoredPaymentMethod != nil {
+			t.Errorf("StoredPaymentMethod = %+v, want nil", *status.StoredPaymentMethod)
+		}
+	})
 }
 
 func TestGetStatusSavedCardExampleMatchesContract(t *testing.T) {
 	contract := loadContract(t)
 	endpoint := contract.Endpoints.GetStatus
 
-	server, _ := newTestServer(t, reply{Body: string(endpoint.SavedCardExample)})
-	status, err := newTestClient(t, server.URL).GetStatus(context.Background(), "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0")
-	if err != nil {
-		t.Fatalf("the contract's saved-card example must parse: %v", err)
-	}
+	bothWireForms(t, endpoint.SavedCardExample, func(t *testing.T, body json.RawMessage) {
+		server, _ := newTestServer(t, reply{Body: string(body)})
+		status, err := newTestClient(t, server.URL).GetStatus(context.Background(), "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0")
+		if err != nil {
+			t.Fatalf("the contract's saved-card example must parse: %v", err)
+		}
 
-	if status.Status != StatusSucceeded {
-		t.Errorf("Status = %q, want succeeded", status.Status)
+		if status.Status != StatusSucceeded {
+			t.Errorf("Status = %q, want succeeded", status.Status)
+		}
+		if status.StoredPaymentMethod == nil {
+			t.Fatal("StoredPaymentMethod = nil, want the saved card")
+		}
+		want := StoredPaymentMethod{
+			ID: "pm_0123456789abcdef0123456789abcdef", Brand: "visa", Last4: "4242",
+			ExpiryMonth: 12, ExpiryYear: 2029, Status: StoredPaymentMethodStatusActive,
+		}
+		if *status.StoredPaymentMethod != want {
+			t.Errorf("StoredPaymentMethod = %+v, want %+v", *status.StoredPaymentMethod, want)
+		}
+		if !contains(StoredPaymentMethodStatuses, status.StoredPaymentMethod.Status) {
+			t.Errorf("stored payment method status %q is not in the vocabulary", status.StoredPaymentMethod.Status)
+		}
+		if !strings.HasPrefix(status.StoredPaymentMethod.ID, "pm_") || len(status.StoredPaymentMethod.ID) != 35 {
+			t.Errorf("ID = %q, want pm_ plus 32 hex characters", status.StoredPaymentMethod.ID)
+		}
+	})
+
+	// The card's own nullable fields: absent on the wire when the provider
+	// did not report them, zero once read, id and status intact.
+	var bare map[string]any
+	if err := json.Unmarshal(endpoint.SavedCardExample, &bare); err != nil {
+		t.Fatalf("savedCardExample: %v", err)
 	}
-	if status.PaymentMethod == nil {
-		t.Fatal("PaymentMethod = nil, want the saved card")
+	card := bare["storedPaymentMethod"].(map[string]any)
+	for _, field := range []string{"brand", "last4", "expiryMonth", "expiryYear"} {
+		card[field] = nil
 	}
-	want := PaymentMethod{
-		ID: "pm_0123456789abcdef0123456789abcdef", Brand: "visa", Last4: "4242",
-		ExpiryMonth: 12, ExpiryYear: 2029, Status: PaymentMethodStatusActive,
+	bareBody, _ := json.Marshal(bare)
+	bothWireForms(t, bareBody, func(t *testing.T, body json.RawMessage) {
+		server, _ := newTestServer(t, reply{Body: string(body)})
+		status, err := newTestClient(t, server.URL).GetStatus(context.Background(), "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0")
+		if err != nil {
+			t.Fatalf("a card without brand, last4 and expiry must parse: %v", err)
+		}
+		want := StoredPaymentMethod{ID: "pm_0123456789abcdef0123456789abcdef", Status: StoredPaymentMethodStatusActive}
+		if status.StoredPaymentMethod == nil || *status.StoredPaymentMethod != want {
+			t.Errorf("StoredPaymentMethod = %+v, want %+v", status.StoredPaymentMethod, want)
+		}
+	})
+
+	// Every stored payment method status deserializes the same way.
+	for _, value := range StoredPaymentMethodStatuses {
+		card["status"] = value
+		body, _ := json.Marshal(bare)
+		server, _ := newTestServer(t, reply{Body: string(body)})
+		status, err := newTestClient(t, server.URL).GetStatus(context.Background(), "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0")
+		if err != nil || status.StoredPaymentMethod == nil || status.StoredPaymentMethod.Status != value {
+			t.Errorf("status %q: got %+v, %v", value, status.StoredPaymentMethod, err)
+		}
 	}
-	if *status.PaymentMethod != want {
-		t.Errorf("PaymentMethod = %+v, want %+v", *status.PaymentMethod, want)
+}
+
+func chargeData(t *testing.T, envelope json.RawMessage) json.RawMessage {
+	t.Helper()
+	var wrapped struct {
+		Data json.RawMessage `json:"data"`
 	}
-	if !contains(PaymentMethodStatuses, status.PaymentMethod.Status) {
-		t.Errorf("payment method status %q is not in the vocabulary", status.PaymentMethod.Status)
+	if err := json.Unmarshal(envelope, &wrapped); err != nil {
+		t.Fatalf("envelope: %v", err)
 	}
+	return wrapped.Data
 }
 
 func TestChargePaymentMethodResponseMatchesContract(t *testing.T) {
@@ -464,50 +601,210 @@ func TestChargePaymentMethodResponseMatchesContract(t *testing.T) {
 	if want := PaymentMethodsPath + "/{paymentMethodId}/charges"; endpoint.Path != want {
 		t.Errorf("contract path = %q, PaymentMethodsPath says %q", endpoint.Path, want)
 	}
-	if endpoint.Method != "POST" || endpoint.HTTPStatus != 201 {
-		t.Errorf("contract says %s %d, want POST 201", endpoint.Method, endpoint.HTTPStatus)
+	if endpoint.Method != "POST" || endpoint.HTTPStatus != 201 || endpoint.DeclinedHTTPStatus != 402 {
+		t.Errorf("contract says %s %d/%d, want POST 201/402", endpoint.Method, endpoint.HTTPStatus, endpoint.DeclinedHTTPStatus)
 	}
 	assertSameFields(t, "PaymentMethodCharge", jsonFieldNames(t, PaymentMethodCharge{}), endpoint.Fields)
 
 	params := ChargePaymentMethodParams{Amount: 8440, Currency: "EUR", OrderReference: "order-1042"}
 
-	server, calls := newTestServer(t, reply{Status: endpoint.HTTPStatus, Body: string(endpoint.SuccessExample)})
-	charge, err := newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), paymentMethodID, params)
-	if err != nil {
-		t.Fatalf("the contract's success example must parse: %v", err)
-	}
-	if charge.ChargeID != "chg_7a8b9c0d1e2f3a4b" || charge.Status != ChargeStatusSucceeded {
-		t.Errorf("charge = %+v", charge)
-	}
-	if charge.TransactionID != "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d" {
-		t.Errorf("TransactionID = %q", charge.TransactionID)
-	}
-	// Nulls must land as zero values.
-	if charge.DeclineClass != "" || charge.DeclineCode != "" {
-		t.Errorf("decline fields %q/%q, want empty for nulls", charge.DeclineClass, charge.DeclineCode)
-	}
-	call := calls()[0]
-	if want := strings.Replace(endpoint.Path, "{paymentMethodId}", paymentMethodID, 1); call.Path != want {
-		t.Errorf("path = %q, want %q", call.Path, want)
-	}
-	if call.Method != endpoint.Method {
-		t.Errorf("method = %q, want %q", call.Method, endpoint.Method)
-	}
-	if call.Header.Get("Idempotency-Key") == "" {
-		t.Error("a charge must carry an Idempotency-Key")
+	// 201: the envelope is unwrapped and the charge is exactly the fixture's fields.
+	bothWireForms(t, endpoint.SuccessExample, func(t *testing.T, body json.RawMessage) {
+		server, calls := newTestServer(t, reply{Status: endpoint.HTTPStatus, Body: string(body)})
+		charge, err := newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), paymentMethodID, params)
+		if err != nil {
+			t.Fatalf("the contract's success example must parse: %v", err)
+		}
+		if charge.ChargeID != "ch_1a2b3c4d5e6f4a7b8c9d0e1f2a3b4c5d" || charge.Status != ChargeStatusSucceeded {
+			t.Errorf("charge = %+v", charge)
+		}
+		if charge.TransactionID != "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d" {
+			t.Errorf("TransactionID = %q", charge.TransactionID)
+		}
+		// Nulls and omissions must land as zero values.
+		if charge.DeclineClass != "" || charge.DeclineCode != "" {
+			t.Errorf("decline fields %q/%q, want empty", charge.DeclineClass, charge.DeclineCode)
+		}
+		if len(charge.Raw) == 0 {
+			t.Error("Raw is empty")
+		}
+		call := calls()[0]
+		if want := strings.Replace(endpoint.Path, "{paymentMethodId}", paymentMethodID, 1); call.Path != want {
+			t.Errorf("path = %q, want %q", call.Path, want)
+		}
+		if call.Method != endpoint.Method {
+			t.Errorf("method = %q, want %q", call.Method, endpoint.Method)
+		}
+		if call.Header.Get("Idempotency-Key") == "" {
+			t.Error("a charge must carry an Idempotency-Key")
+		}
+	})
+
+	// A durable replay answers 200 with the same body; still a charge.
+	server, _ := newTestServer(t, reply{Status: 200, Body: string(endpoint.SuccessExample)})
+	replayed, err := newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), paymentMethodID, params)
+	if err != nil || replayed.ChargeID != "ch_1a2b3c4d5e6f4a7b8c9d0e1f2a3b4c5d" {
+		t.Errorf("a 200 replay must return the charge: %+v, %v", replayed, err)
 	}
 
-	// The declined example is a 201 too, and a result rather than an error.
-	server, _ = newTestServer(t, reply{Status: endpoint.HTTPStatus, Body: string(endpoint.DeclinedExample)})
-	declined, err := newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), paymentMethodID, params)
-	if err != nil {
-		t.Fatalf("the contract's declined example must parse: %v", err)
+	// 402: a decline is a result with a class, not an error, even though the
+	// envelope says success=false and carries CHARGE_DECLINED.
+	bothWireForms(t, endpoint.DeclinedExample, func(t *testing.T, body json.RawMessage) {
+		server, _ := newTestServer(t, reply{Status: endpoint.DeclinedHTTPStatus, Body: string(body)})
+		declined, err := newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), paymentMethodID, params)
+		if err != nil {
+			t.Fatalf("the contract's declined example must be a result: %v", err)
+		}
+		if declined.Status != ChargeStatusFailed || declined.DeclineClass != DeclineClassSoftFunds || declined.DeclineCode != "51" {
+			t.Errorf("declined = %+v", declined)
+		}
+		if declined.TransactionID != "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e" {
+			t.Errorf("TransactionID = %q", declined.TransactionID)
+		}
+		if !contains(ChargeStatuses, declined.Status) || !contains(DeclineClasses, declined.DeclineClass) {
+			t.Errorf("declined example uses values outside the vocabularies: %+v", declined)
+		}
+	})
+
+	// Every charge status and every decline class deserializes the same way.
+	var success, declined map[string]any
+	if err := json.Unmarshal(endpoint.SuccessExample, &success); err != nil {
+		t.Fatal(err)
 	}
-	if declined.Status != ChargeStatusFailed || declined.DeclineClass != DeclineClassSoftFunds || declined.DeclineCode != "51" {
-		t.Errorf("declined = %+v", declined)
+	if err := json.Unmarshal(endpoint.DeclinedExample, &declined); err != nil {
+		t.Fatal(err)
 	}
-	if !contains(ChargeStatuses, declined.Status) || !contains(DeclineClasses, declined.DeclineClass) {
-		t.Errorf("declined example uses values outside the vocabularies: %+v", declined)
+	for _, value := range ChargeStatuses {
+		success["data"].(map[string]any)["status"] = value
+		body, _ := json.Marshal(success)
+		server, _ := newTestServer(t, reply{Status: 201, Body: string(body)})
+		charge, err := newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), paymentMethodID, params)
+		if err != nil || charge.Status != value {
+			t.Errorf("status %q: got %+v, %v", value, charge, err)
+		}
+	}
+	for _, value := range DeclineClasses {
+		declined["data"].(map[string]any)["declineClass"] = value
+		body, _ := json.Marshal(declined)
+		server, _ := newTestServer(t, reply{Status: 402, Body: string(body)})
+		charge, err := newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), paymentMethodID, params)
+		if err != nil || charge.DeclineClass != value {
+			t.Errorf("declineClass %q: got %+v, %v", value, charge, err)
+		}
+	}
+}
+
+// 409, 422, 502, 503: every error example is a *ChargeError keeping the
+// status, the code, the message and whatever charge row the gateway attached,
+// in both wire forms.
+func TestChargeErrorExamplesMatchContract(t *testing.T) {
+	contract := loadContract(t)
+	endpoint := contract.Endpoints.ChargePaymentMethod
+	paymentMethodID := "pm_0123456789abcdef0123456789abcdef"
+	params := ChargePaymentMethodParams{Amount: 8440, Currency: "EUR", OrderReference: "order-1042"}
+
+	if len(endpoint.ErrorExamples) == 0 {
+		t.Fatal("the contract lists no charge error examples")
+	}
+	seen := map[string]bool{}
+	for _, example := range endpoint.ErrorExamples {
+		seen[example.Code] = true
+		if !contains(ChargeErrorCodes, example.Code) {
+			t.Errorf("error example code %q is not in ChargeErrorCodes", example.Code)
+		}
+		var body struct {
+			Data  json.RawMessage `json:"data"`
+			Error struct {
+				Code       string `json:"code"`
+				Message    string `json:"message"`
+				StatusCode int    `json:"statusCode"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(example.Body, &body); err != nil {
+			t.Fatalf("error example %s: %v", example.Code, err)
+		}
+		if body.Error.Code != example.Code || body.Error.StatusCode != example.HTTPStatus {
+			t.Errorf("error example %s: body says %s %d", example.Code, body.Error.Code, body.Error.StatusCode)
+		}
+		hasData := isJSONObject(body.Data)
+		label := example.Code + "/" + map[bool]string{true: "with data", false: "without data"}[hasData]
+
+		t.Run(label, func(t *testing.T) {
+			bothWireForms(t, example.Body, func(t *testing.T, wire json.RawMessage) {
+				server, _ := newTestServer(t, reply{Status: example.HTTPStatus, Body: string(wire)})
+				charge, err := newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), paymentMethodID, params)
+				if charge != nil {
+					t.Fatalf("an error example must not produce a charge: %+v", charge)
+				}
+				var chargeErr *ChargeError
+				if !errors.As(err, &chargeErr) {
+					t.Fatalf("got %T (%v), want *ChargeError", err, err)
+				}
+				if chargeErr.HTTPStatus != example.HTTPStatus || chargeErr.ErrorCode != example.Code {
+					t.Errorf("got %d %s, want %d %s", chargeErr.HTTPStatus, chargeErr.ErrorCode, example.HTTPStatus, example.Code)
+				}
+				if chargeErr.Error() != body.Error.Message {
+					t.Errorf("message = %q, want the gateway's %q", chargeErr.Error(), body.Error.Message)
+				}
+				if string(chargeErr.Raw) != string(wire) {
+					t.Error("Raw must be the whole envelope")
+				}
+				if !errors.Is(err, ErrDominaite) {
+					t.Error("must match errors.Is(err, ErrDominaite)")
+				}
+				if !hasData {
+					if chargeErr.Charge != nil || chargeErr.TransactionID != "" {
+						t.Errorf("no data in the example, but Charge = %+v, TransactionID = %q", chargeErr.Charge, chargeErr.TransactionID)
+					}
+					return
+				}
+				if chargeErr.Charge == nil {
+					t.Fatal("Charge = nil, want the attached row")
+				}
+				var data map[string]any
+				_ = json.Unmarshal(body.Data, &data)
+				if chargeErr.Charge.ChargeID != data["chargeId"] || chargeErr.TransactionID != data["transactionId"] {
+					t.Errorf("Charge = %+v, TransactionID = %q, want %v", chargeErr.Charge, chargeErr.TransactionID, data)
+				}
+				if chargeErr.Charge.DeclineClass != "" || chargeErr.Charge.DeclineCode != "" {
+					t.Errorf("decline fields %q/%q, want empty", chargeErr.Charge.DeclineClass, chargeErr.Charge.DeclineCode)
+				}
+			})
+		})
+	}
+	for _, code := range ChargeErrorCodes {
+		if !seen[code] {
+			t.Errorf("the fixture has no error example for %s", code)
+		}
+	}
+	if first := endpoint.ErrorExamples[0]; first.Code != ChargeErrorOutcomeUnknown {
+		t.Errorf("first error example is %s, want CHARGE_OUTCOME_UNKNOWN with a transaction to poll", first.Code)
+	}
+
+	// 404: an id that is not yours stays the generic *APIError, code and all.
+	notFound := endpoint.NotFoundExample
+	if notFound == nil {
+		t.Fatal("the contract has no charge notFoundExample")
+	}
+	server, _ := newTestServer(t, reply{Status: notFound.HTTPStatus, Body: string(notFound.Body)})
+	_, err := newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), paymentMethodID, params)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.HTTPStatus != 404 || apiErr.ErrorCode != notFound.Code {
+		t.Errorf("got %T (%v), want *APIError 404 %s", err, err, notFound.Code)
+	}
+
+	// A 5xx without the gateway's envelope is the platform being down, not a
+	// charge error; a 2xx without a charge body is not a charge either.
+	server, _ = newTestServer(t, reply{Status: 502, Body: map[string]any{"success": false}})
+	_, err = newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), paymentMethodID, params)
+	var transportErr *TransportError
+	if !errors.As(err, &transportErr) {
+		t.Errorf("codeless 502: got %T (%v), want *TransportError", err, err)
+	}
+	server, _ = newTestServer(t, reply{Status: 201, Body: map[string]any{"success": true}})
+	_, err = newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), paymentMethodID, params)
+	if !errors.As(err, &apiErr) {
+		t.Errorf("201 without a charge body: got %T (%v), want *APIError", err, err)
 	}
 }
 
@@ -537,6 +834,64 @@ func TestRevokePaymentMethodResponseMatchesContract(t *testing.T) {
 	if _, present := call.Header["Idempotency-Key"]; present {
 		t.Error("a revoke must not carry an Idempotency-Key")
 	}
+
+	// 502 and 503: a *RevokeError keeping the status, the code and the message.
+	if len(endpoint.ErrorExamples) == 0 {
+		t.Fatal("the contract lists no revoke error examples")
+	}
+	seen := map[string]bool{}
+	for _, example := range endpoint.ErrorExamples {
+		seen[example.Code] = true
+		if !contains(RevokeErrorCodes, example.Code) {
+			t.Errorf("error example code %q is not in RevokeErrorCodes", example.Code)
+		}
+		var body struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(example.Body, &body)
+		t.Run(example.Code, func(t *testing.T) {
+			server, _ := newTestServer(t, reply{Status: example.HTTPStatus, Body: string(example.Body)})
+			err := newTestClient(t, server.URL).RevokePaymentMethod(context.Background(), paymentMethodID)
+			var revokeErr *RevokeError
+			if !errors.As(err, &revokeErr) {
+				t.Fatalf("got %T (%v), want *RevokeError", err, err)
+			}
+			if revokeErr.HTTPStatus != example.HTTPStatus || revokeErr.ErrorCode != example.Code || revokeErr.Error() != body.Error.Message {
+				t.Errorf("got %d %s %q, want %d %s %q", revokeErr.HTTPStatus, revokeErr.ErrorCode, revokeErr.Error(), example.HTTPStatus, example.Code, body.Error.Message)
+			}
+			if string(revokeErr.Raw) != string(example.Body) {
+				t.Error("Raw must be the whole envelope")
+			}
+			if !errors.Is(err, ErrDominaite) {
+				t.Error("must match errors.Is(err, ErrDominaite)")
+			}
+		})
+	}
+	for _, code := range RevokeErrorCodes {
+		if !seen[code] {
+			t.Errorf("the fixture has no error example for %s", code)
+		}
+	}
+
+	// 404: the gateway's validation shape, still the generic *APIError.
+	notFound := endpoint.NotFoundExample
+	if notFound == nil {
+		t.Fatal("the contract has no revoke notFoundExample")
+	}
+	server, _ = newTestServer(t, reply{Status: notFound.HTTPStatus, Body: string(notFound.Body)})
+	err := newTestClient(t, server.URL).RevokePaymentMethod(context.Background(), paymentMethodID)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.HTTPStatus != 404 || apiErr.ErrorCode != notFound.Code {
+		t.Errorf("got %T (%v), want *APIError 404 %s", err, err, notFound.Code)
+	}
+	server, _ = newTestServer(t, reply{Status: 503, Body: map[string]any{"success": false}})
+	err = newTestClient(t, server.URL).RevokePaymentMethod(context.Background(), paymentMethodID)
+	var transportErr *TransportError
+	if !errors.As(err, &transportErr) {
+		t.Errorf("codeless 503: got %T (%v), want *TransportError", err, err)
+	}
 }
 
 // The contract examples themselves carry exactly their declared fields, so the
@@ -546,16 +901,22 @@ func TestContractExamplesCarryTheirDeclaredFields(t *testing.T) {
 	getStatus := contract.Endpoints.GetStatus
 	charge := contract.Endpoints.ChargePaymentMethod
 
+	assertSameFields(t, "getStatus.example", jsonKeys(t, getStatus.Example), getStatus.Fields)
 	assertSameFields(t, "getStatus.savedCardExample", jsonKeys(t, getStatus.SavedCardExample), getStatus.Fields)
 	var saved struct {
-		PaymentMethod json.RawMessage `json:"paymentMethod"`
+		StoredPaymentMethod json.RawMessage `json:"storedPaymentMethod"`
 	}
 	if err := json.Unmarshal(getStatus.SavedCardExample, &saved); err != nil {
 		t.Fatalf("savedCardExample: %v", err)
 	}
-	assertSameFields(t, "getStatus.savedCardExample.paymentMethod", jsonKeys(t, saved.PaymentMethod), getStatus.PaymentMethodFields)
-	assertSameFields(t, "chargePaymentMethod.successExample", jsonKeys(t, charge.SuccessExample), charge.Fields)
-	assertSameFields(t, "chargePaymentMethod.declinedExample", jsonKeys(t, charge.DeclinedExample), charge.Fields)
+	assertSameFields(t, "getStatus.savedCardExample.storedPaymentMethod", jsonKeys(t, saved.StoredPaymentMethod), getStatus.StoredPaymentMethodFields)
+	assertSameFields(t, "chargePaymentMethod.successExample.data", jsonKeys(t, chargeData(t, charge.SuccessExample)), charge.Fields)
+	assertSameFields(t, "chargePaymentMethod.declinedExample.data", jsonKeys(t, chargeData(t, charge.DeclinedExample)), charge.Fields)
+	for _, example := range charge.ErrorExamples {
+		if data := chargeData(t, example.Body); isJSONObject(data) {
+			assertSameFields(t, "chargePaymentMethod.errorExamples."+example.Code+".data", jsonKeys(t, data), charge.Fields)
+		}
+	}
 }
 
 func jsonKeys(t *testing.T, raw json.RawMessage) []string {
