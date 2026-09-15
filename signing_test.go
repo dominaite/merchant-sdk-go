@@ -37,6 +37,58 @@ var vector = struct {
 	Signature:      "8f5fba0b29a8eea81b76a0e6d7119e79ec68f586910f77713b045652e5ce9b74",
 }
 
+// signingVector is one known-answer vector for Sign.
+type signingVector struct {
+	Secret         string
+	Timestamp      string
+	Method         string
+	Path           string
+	IdempotencyKey string
+	Body           string
+	BodySHA256     string
+	Signature      string
+}
+
+func (v signingVector) input() SignInput {
+	return SignInput{
+		Secret:         v.Secret,
+		Timestamp:      v.Timestamp,
+		Method:         v.Method,
+		Path:           v.Path,
+		IdempotencyKey: v.IdempotencyKey,
+		Body:           v.Body,
+	}
+}
+
+// Stored-payment-method vectors, same secret and timestamp. chargeVector is the
+// only POST besides sessions and the only one whose canonical path carries a
+// resource id; revokeVector pins that DELETE signs an empty key and an empty
+// body exactly like GET. Shared byte-for-byte with the gateway's
+// MerchantApiRequestAuthenticator tests.
+const testPaymentMethodID = "pm_0123456789abcdef0123456789abcdef"
+
+var chargeVector = signingVector{
+	Secret:         vector.Secret,
+	Timestamp:      vector.Timestamp,
+	Method:         "POST",
+	Path:           PaymentMethodsPath + "/" + testPaymentMethodID + "/charges",
+	IdempotencyKey: "00000000-0000-4000-8000-000000000003",
+	Body:           `{"amount":2500,"currency":"EUR","orderReference":"order-1043"}`,
+	BodySHA256:     "641a0d2b08f88ebc458dca49410dede0a166359a5030bff5c977e507f13ab828",
+	Signature:      "9ce9f54efa2533a46aa4493b97b56aeb657f41d6a18f1c008c7fd412029aebf9",
+}
+
+var revokeVector = signingVector{
+	Secret:         vector.Secret,
+	Timestamp:      vector.Timestamp,
+	Method:         "DELETE",
+	Path:           PaymentMethodsPath + "/" + testPaymentMethodID,
+	IdempotencyKey: "",
+	Body:           "",
+	BodySHA256:     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+	Signature:      "9330100343c4b820504890a09829a193d5815ca39e92160fdfc13d320a802a02",
+}
+
 func vectorInput() SignInput {
 	return SignInput{
 		Secret:         vector.Secret,
@@ -98,6 +150,32 @@ func TestSignGetShapeUsesEmptyKeyAndEmptyBody(t *testing.T) {
 	mac.Write([]byte(payload))
 	if want := hex.EncodeToString(mac.Sum(nil)); got != want {
 		t.Fatalf("GET signature = %s, want %s", got, want)
+	}
+}
+
+func TestChargeVectorPostWithBodyAndKeyOnThePaymentMethodsPath(t *testing.T) {
+	sum := sha256.Sum256([]byte(chargeVector.Body))
+	if got := hex.EncodeToString(sum[:]); got != chargeVector.BodySHA256 {
+		t.Fatalf("body sha256 = %s, want %s", got, chargeVector.BodySHA256)
+	}
+	if got := Sign(chargeVector.input()); got != chargeVector.Signature {
+		t.Fatalf("charge signature = %s, want %s", got, chargeVector.Signature)
+	}
+}
+
+func TestRevokeVectorDeleteSignsEmptyKeyAndEmptyBody(t *testing.T) {
+	sum := sha256.Sum256([]byte(revokeVector.Body))
+	if got := hex.EncodeToString(sum[:]); got != revokeVector.BodySHA256 {
+		t.Fatalf("body sha256 = %s, want %s", got, revokeVector.BodySHA256)
+	}
+	if got := Sign(revokeVector.input()); got != revokeVector.Signature {
+		t.Fatalf("revoke signature = %s, want %s", got, revokeVector.Signature)
+	}
+	// Same recipe as the session vector: only the method and path moved.
+	asGet := revokeVector.input()
+	asGet.Method = "GET"
+	if Sign(asGet) == revokeVector.Signature {
+		t.Fatal("DELETE and GET on the same path must not sign the same")
 	}
 }
 

@@ -464,6 +464,63 @@ with the same order-derived idempotency key: within a few minutes of expiry that
 `DUPLICATE_REQUEST` (retry the same key shortly), and past that it succeeds with a fresh
 session. See [Recovering from a replay refusal](#recovering-from-a-replay-refusal).
 
+## Stored payment methods (recurring)
+
+Set `SaveCard: true` when you create a session and, once that payment succeeds, the gateway keeps
+the card on file. You never see the card number or the provider token: `GetStatus` returns a
+`PaymentMethod` with an opaque `ID`, the `Brand`, the `Last4` and the expiry, and that `ID` is what
+you charge and revoke with. Store it against your customer.
+
+```go
+session, err := client.CreateCheckoutSession(ctx, dominaite.CreateCheckoutSessionParams{
+	Amount:         2500,
+	Currency:       "EUR",
+	OrderReference: "sub-8817-first",
+	SaveCard:       true,
+})
+// ... the payer completes the hosted checkout ...
+status, err := client.GetStatus(ctx, session.TransactionID)
+if status.Status == dominaite.StatusSucceeded && status.PaymentMethod != nil &&
+	status.PaymentMethod.Status == dominaite.PaymentMethodStatusActive {
+	db.SaveCard(customerID, status.PaymentMethod.ID) // pm_...
+}
+
+// Later, off-session, no payer present:
+charge, err := client.ChargePaymentMethod(ctx, paymentMethodID, dominaite.ChargePaymentMethodParams{
+	Amount:         2500,
+	Currency:       "EUR",
+	OrderReference: "sub-8817-2026-10",
+	Description:    "Monthly plan, October",
+	IdempotencyKey: "sub-8817-2026-10", // derive it from the billing period, never random per attempt
+})
+if err != nil {
+	return err // refused, not yours, auth, transport - see Errors
+}
+
+switch charge.Status {
+case dominaite.ChargeStatusSucceeded:
+case dominaite.ChargeStatusPending:
+	// Not terminal. Poll GetStatus(charge.TransactionID), or wait for the webhook.
+case dominaite.ChargeStatusFailed:
+	// Not an error: branch on the class, log the code.
+	// DeclineClassHard            - give up on this card, ask the customer for another one
+	// DeclineClassSoftFunds       - insufficient funds, retry later (not in a loop)
+	// DeclineClassSoftSCARequired - the issuer wants the customer present: send them through a
+	//                               hosted session with SaveCard and charge the new method
+	// DeclineClassSoftOther       - transient, one retry later is reasonable
+	handleDecline(charge.DeclineClass, charge.DeclineCode)
+}
+
+// When the customer removes the card:
+err = client.RevokePaymentMethod(ctx, paymentMethodID) // 204, returns nil
+```
+
+A charge is signed exactly like a session and carries an `Idempotency-Key`, so a retry after a
+timeout with the **same** key never charges the card twice. A charge the gateway refuses to attempt
+at all (replayed key, payments off, method revoked) is a `*RefusalError` with the usual codes; an
+id that is not yours is an `*APIError` with `HTTPStatus` 404. Revoking signs an empty key and an
+empty body, like `GetStatus`.
+
 ## Status polling (fallback, and the reconciliation sweep)
 
 **Prefer webhooks for learning that a payment resolved.** Polling is the right tool for three

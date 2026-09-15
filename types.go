@@ -34,6 +34,13 @@ type CreateCheckoutSessionParams struct {
 	Theme       string `json:"theme,omitempty"`
 	Description string `json:"description,omitempty"`
 
+	// SaveCard asks the gateway to keep the card on file once this payment is
+	// approved, so you can charge it again later with Client.ChargePaymentMethod.
+	// The stored method shows up on CheckoutStatus.PaymentMethod after the
+	// payment succeeds; a declined first payment stores nothing. The card details
+	// themselves never reach you: you get an id, a brand and the last four digits.
+	SaveCard bool `json:"saveCard,omitempty"`
+
 	// IdempotencyKey is auto-generated when empty. It travels in the header and
 	// in the signature, never in the body. Retrying with the same key never
 	// creates a second payment, so on a timeout retry with the same key.
@@ -185,9 +192,144 @@ type CheckoutStatus struct {
 	UpdatedAt      string `json:"updatedAt,omitempty"`
 	// ExpiresAt is present while the session is still payable.
 	ExpiresAt string `json:"expiresAt,omitempty"`
+	// PaymentMethod is the card kept on file for this payment. Present once a
+	// session created with SaveCard has succeeded; nil otherwise. Store
+	// PaymentMethod.ID against your customer - it is what
+	// Client.ChargePaymentMethod takes.
+	PaymentMethod *PaymentMethod `json:"paymentMethod,omitempty"`
 
 	// Raw is the unparsed payload, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
+}
+
+// Stored payment method status values, in the gateway's own order.
+//
+// Only active methods can be charged. PaymentMethodStatusRevoked is what
+// Client.RevokePaymentMethod leaves behind; PaymentMethodStatusExpired means the
+// card's expiry date has passed.
+const (
+	PaymentMethodStatusActive  = "active"
+	PaymentMethodStatusRevoked = "revoked"
+	PaymentMethodStatusExpired = "expired"
+)
+
+// PaymentMethodStatuses is the complete v1 stored-payment-method status
+// vocabulary. Treat a value outside this list as not chargeable.
+var PaymentMethodStatuses = []string{
+	PaymentMethodStatusActive,
+	PaymentMethodStatusRevoked,
+	PaymentMethodStatusExpired,
+}
+
+// PaymentMethod is a card kept on file. Never the card number, never the PSP
+// token - only what you may show a customer.
+type PaymentMethod struct {
+	// ID is opaque (pm_...) - the handle you charge and revoke with.
+	ID string `json:"id"`
+	// Brand is the card brand as the gateway reports it, e.g. "visa", "mastercard".
+	Brand string `json:"brand"`
+	// Last4 is the last four digits of the card number, for display only.
+	Last4 string `json:"last4"`
+	// ExpiryMonth is 1 to 12.
+	ExpiryMonth int `json:"expiryMonth"`
+	// ExpiryYear is four digits, e.g. 2029.
+	ExpiryYear int `json:"expiryYear"`
+	// Status is one of the PaymentMethodStatus* constants. Treat any value you
+	// do not recognise as not chargeable.
+	Status string `json:"status"`
+}
+
+// ChargePaymentMethodParams are the parameters for Client.ChargePaymentMethod.
+// Amount, Currency and OrderReference are required.
+type ChargePaymentMethodParams struct {
+	// Amount is in MINOR units: 2500 is 25.00 EUR. Integers only.
+	Amount int64 `json:"amount"`
+	// Currency is ISO 4217, e.g. "EUR".
+	Currency string `json:"currency"`
+	// OrderReference is your own order id, at most 100 characters. It shows up
+	// in your dashboard.
+	OrderReference string `json:"orderReference"`
+	Description    string `json:"description,omitempty"`
+
+	// IdempotencyKey is auto-generated when empty. It travels in the header and
+	// in the signature, never in the body. Retrying with the same key never
+	// charges the card twice, so on a timeout retry with the same key.
+	IdempotencyKey string `json:"-"`
+}
+
+// Charge status values returned by ChargePaymentMethod. ChargeStatusPending is
+// not terminal: keep polling GetStatus on the charge's TransactionID.
+const (
+	ChargeStatusSucceeded = "succeeded"
+	ChargeStatusFailed    = "failed"
+	ChargeStatusPending   = "pending"
+)
+
+// ChargeStatuses is the complete v1 charge status vocabulary. Treat a value
+// outside this list as still open.
+var ChargeStatuses = []string{
+	ChargeStatusSucceeded,
+	ChargeStatusFailed,
+	ChargeStatusPending,
+}
+
+// Decline classes, coarse enough to act on without reading the issuer's code:
+//   - DeclineClassHard: do not retry this card, ask the customer for another one.
+//   - DeclineClassSoftFunds: insufficient funds; retry later (after the
+//     customer's payday, not in a loop).
+//   - DeclineClassSoftSCARequired: the issuer wants the customer present; send
+//     them through a hosted checkout session with SaveCard instead of charging
+//     off-session again.
+//   - DeclineClassSoftOther: a transient issuer or network condition; one retry
+//     later is reasonable.
+const (
+	DeclineClassHard            = "hard"
+	DeclineClassSoftFunds       = "soft_funds"
+	DeclineClassSoftSCARequired = "soft_sca_required"
+	DeclineClassSoftOther       = "soft_other"
+)
+
+// DeclineClasses is the complete v1 decline class vocabulary.
+var DeclineClasses = []string{
+	DeclineClassHard,
+	DeclineClassSoftFunds,
+	DeclineClassSoftSCARequired,
+	DeclineClassSoftOther,
+}
+
+// PaymentMethodCharge is what ChargePaymentMethod returns. A decline is a
+// result, not an error: Status is ChargeStatusFailed and DeclineClass says what
+// to do next.
+type PaymentMethodCharge struct {
+	ChargeID string `json:"chargeId"`
+	// Status is one of the ChargeStatus* constants. Treat anything you do not
+	// recognise as still open.
+	Status string `json:"status"`
+	// DeclineClass is one of the DeclineClass* constants, present when Status is
+	// failed. Empty otherwise.
+	DeclineClass string `json:"declineClass,omitempty"`
+	// DeclineCode is the raw decline code, for your logs; branch on
+	// DeclineClass instead. Empty unless the charge failed.
+	DeclineCode string `json:"declineCode,omitempty"`
+	// TransactionID is the transaction the charge created; readable with
+	// GetStatus.
+	TransactionID string `json:"transactionId"`
+
+	// Raw is the unparsed payload, for fields this struct does not model yet.
+	Raw json.RawMessage `json:"-"`
+}
+
+// chargeRefusalProbe reads just enough of a charge response to tell a refusal
+// from a result. Business refusals (replayed key, payments off, method not
+// chargeable) reuse the create endpoint's HTTP 200 success=false shape, so
+// the branch is on Success and the presence of a chargeId, not on the status
+// code.
+type chargeRefusalProbe struct {
+	Success       *bool  `json:"success"`
+	ChargeID      string `json:"chargeId"`
+	TransactionID string `json:"transactionId"`
+	ErrorCode     string `json:"errorCode"`
+	ErrorMessage  string `json:"errorMessage"`
 }
 
 // Webhook event types. This is the complete v1 catalog - endpoint registration

@@ -18,24 +18,33 @@ import (
 const contractPath = "testdata/merchant-api-contract.json"
 
 type endpointContract struct {
-	Method         string          `json:"method"`
-	Path           string          `json:"path"`
-	Fields         []string        `json:"fields"`
-	CheckoutFields []string        `json:"checkoutFields"`
-	Example        json.RawMessage `json:"example"`
-	SuccessExample json.RawMessage `json:"successExample"`
-	RefusalExample json.RawMessage `json:"refusalExample"`
+	Method              string          `json:"method"`
+	Path                string          `json:"path"`
+	HTTPStatus          int             `json:"httpStatus"`
+	Fields              []string        `json:"fields"`
+	CheckoutFields      []string        `json:"checkoutFields"`
+	PaymentMethodFields []string        `json:"paymentMethodFields"`
+	Example             json.RawMessage `json:"example"`
+	SavedCardExample    json.RawMessage `json:"savedCardExample"`
+	SuccessExample      json.RawMessage `json:"successExample"`
+	DeclinedExample     json.RawMessage `json:"declinedExample"`
+	RefusalExample      json.RawMessage `json:"refusalExample"`
 }
 
 type responseContract struct {
-	Version                  string   `json:"version"`
-	StatusVocabulary         []string `json:"statusVocabulary"`
-	SessionRefusalErrorCodes []string `json:"sessionRefusalErrorCodes"`
-	ValidationErrorCodes     []string `json:"validationErrorCodes"`
-	Endpoints                struct {
+	Version                       string   `json:"version"`
+	StatusVocabulary              []string `json:"statusVocabulary"`
+	PaymentMethodStatusVocabulary []string `json:"paymentMethodStatusVocabulary"`
+	ChargeStatusVocabulary        []string `json:"chargeStatusVocabulary"`
+	DeclineClassVocabulary        []string `json:"declineClassVocabulary"`
+	SessionRefusalErrorCodes      []string `json:"sessionRefusalErrorCodes"`
+	ValidationErrorCodes          []string `json:"validationErrorCodes"`
+	Endpoints                     struct {
 		Ping                  endpointContract `json:"ping"`
 		CreateCheckoutSession endpointContract `json:"createCheckoutSession"`
 		GetStatus             endpointContract `json:"getStatus"`
+		ChargePaymentMethod   endpointContract `json:"chargePaymentMethod"`
+		RevokePaymentMethod   endpointContract `json:"revokePaymentMethod"`
 	} `json:"endpoints"`
 }
 
@@ -395,4 +404,179 @@ func TestGetStatusResponseMatchesContract(t *testing.T) {
 	if status.ExpiresAt != "" {
 		t.Errorf("ExpiresAt = %q, want empty for a null", status.ExpiresAt)
 	}
+}
+
+// The stored payment method and its status vocabulary, exactly as the contract
+// lists them, in the gateway's order.
+func TestPaymentMethodMatchesContract(t *testing.T) {
+	contract := loadContract(t)
+
+	assertSameFields(t, "PaymentMethod", jsonFieldNames(t, PaymentMethod{}), contract.Endpoints.GetStatus.PaymentMethodFields)
+	if !reflect.DeepEqual(PaymentMethodStatuses, contract.PaymentMethodStatusVocabulary) {
+		t.Errorf("PaymentMethodStatuses = %v, contract says %v", PaymentMethodStatuses, contract.PaymentMethodStatusVocabulary)
+	}
+}
+
+func TestChargeVocabulariesMatchContract(t *testing.T) {
+	contract := loadContract(t)
+
+	if !reflect.DeepEqual(ChargeStatuses, contract.ChargeStatusVocabulary) {
+		t.Errorf("ChargeStatuses = %v, contract says %v", ChargeStatuses, contract.ChargeStatusVocabulary)
+	}
+	if !reflect.DeepEqual(DeclineClasses, contract.DeclineClassVocabulary) {
+		t.Errorf("DeclineClasses = %v, contract says %v", DeclineClasses, contract.DeclineClassVocabulary)
+	}
+}
+
+func TestGetStatusSavedCardExampleMatchesContract(t *testing.T) {
+	contract := loadContract(t)
+	endpoint := contract.Endpoints.GetStatus
+
+	server, _ := newTestServer(t, reply{Body: string(endpoint.SavedCardExample)})
+	status, err := newTestClient(t, server.URL).GetStatus(context.Background(), "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0")
+	if err != nil {
+		t.Fatalf("the contract's saved-card example must parse: %v", err)
+	}
+
+	if status.Status != StatusSucceeded {
+		t.Errorf("Status = %q, want succeeded", status.Status)
+	}
+	if status.PaymentMethod == nil {
+		t.Fatal("PaymentMethod = nil, want the saved card")
+	}
+	want := PaymentMethod{
+		ID: "pm_0123456789abcdef0123456789abcdef", Brand: "visa", Last4: "4242",
+		ExpiryMonth: 12, ExpiryYear: 2029, Status: PaymentMethodStatusActive,
+	}
+	if *status.PaymentMethod != want {
+		t.Errorf("PaymentMethod = %+v, want %+v", *status.PaymentMethod, want)
+	}
+	if !contains(PaymentMethodStatuses, status.PaymentMethod.Status) {
+		t.Errorf("payment method status %q is not in the vocabulary", status.PaymentMethod.Status)
+	}
+}
+
+func TestChargePaymentMethodResponseMatchesContract(t *testing.T) {
+	contract := loadContract(t)
+	endpoint := contract.Endpoints.ChargePaymentMethod
+	paymentMethodID := "pm_0123456789abcdef0123456789abcdef"
+
+	if want := PaymentMethodsPath + "/{paymentMethodId}/charges"; endpoint.Path != want {
+		t.Errorf("contract path = %q, PaymentMethodsPath says %q", endpoint.Path, want)
+	}
+	if endpoint.Method != "POST" || endpoint.HTTPStatus != 201 {
+		t.Errorf("contract says %s %d, want POST 201", endpoint.Method, endpoint.HTTPStatus)
+	}
+	assertSameFields(t, "PaymentMethodCharge", jsonFieldNames(t, PaymentMethodCharge{}), endpoint.Fields)
+
+	params := ChargePaymentMethodParams{Amount: 8440, Currency: "EUR", OrderReference: "order-1042"}
+
+	server, calls := newTestServer(t, reply{Status: endpoint.HTTPStatus, Body: string(endpoint.SuccessExample)})
+	charge, err := newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), paymentMethodID, params)
+	if err != nil {
+		t.Fatalf("the contract's success example must parse: %v", err)
+	}
+	if charge.ChargeID != "chg_7a8b9c0d1e2f3a4b" || charge.Status != ChargeStatusSucceeded {
+		t.Errorf("charge = %+v", charge)
+	}
+	if charge.TransactionID != "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d" {
+		t.Errorf("TransactionID = %q", charge.TransactionID)
+	}
+	// Nulls must land as zero values.
+	if charge.DeclineClass != "" || charge.DeclineCode != "" {
+		t.Errorf("decline fields %q/%q, want empty for nulls", charge.DeclineClass, charge.DeclineCode)
+	}
+	call := calls()[0]
+	if want := strings.Replace(endpoint.Path, "{paymentMethodId}", paymentMethodID, 1); call.Path != want {
+		t.Errorf("path = %q, want %q", call.Path, want)
+	}
+	if call.Method != endpoint.Method {
+		t.Errorf("method = %q, want %q", call.Method, endpoint.Method)
+	}
+	if call.Header.Get("Idempotency-Key") == "" {
+		t.Error("a charge must carry an Idempotency-Key")
+	}
+
+	// The declined example is a 201 too, and a result rather than an error.
+	server, _ = newTestServer(t, reply{Status: endpoint.HTTPStatus, Body: string(endpoint.DeclinedExample)})
+	declined, err := newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), paymentMethodID, params)
+	if err != nil {
+		t.Fatalf("the contract's declined example must parse: %v", err)
+	}
+	if declined.Status != ChargeStatusFailed || declined.DeclineClass != DeclineClassSoftFunds || declined.DeclineCode != "51" {
+		t.Errorf("declined = %+v", declined)
+	}
+	if !contains(ChargeStatuses, declined.Status) || !contains(DeclineClasses, declined.DeclineClass) {
+		t.Errorf("declined example uses values outside the vocabularies: %+v", declined)
+	}
+}
+
+func TestRevokePaymentMethodResponseMatchesContract(t *testing.T) {
+	contract := loadContract(t)
+	endpoint := contract.Endpoints.RevokePaymentMethod
+	paymentMethodID := "pm_0123456789abcdef0123456789abcdef"
+
+	if want := PaymentMethodsPath + "/{paymentMethodId}"; endpoint.Path != want {
+		t.Errorf("contract path = %q, PaymentMethodsPath says %q", endpoint.Path, want)
+	}
+	if endpoint.Method != "DELETE" || endpoint.HTTPStatus != 204 || len(endpoint.Fields) != 0 {
+		t.Errorf("contract says %s %d with %d fields, want DELETE 204 with none", endpoint.Method, endpoint.HTTPStatus, len(endpoint.Fields))
+	}
+
+	server, calls := newTestServer(t, reply{Status: endpoint.HTTPStatus, Body: ""})
+	if err := newTestClient(t, server.URL).RevokePaymentMethod(context.Background(), paymentMethodID); err != nil {
+		t.Fatalf("the contract's 204 must be a success: %v", err)
+	}
+	call := calls()[0]
+	if want := strings.Replace(endpoint.Path, "{paymentMethodId}", paymentMethodID, 1); call.Path != want {
+		t.Errorf("path = %q, want %q", call.Path, want)
+	}
+	if call.Method != endpoint.Method {
+		t.Errorf("method = %q, want %q", call.Method, endpoint.Method)
+	}
+	if _, present := call.Header["Idempotency-Key"]; present {
+		t.Error("a revoke must not carry an Idempotency-Key")
+	}
+}
+
+// The contract examples themselves carry exactly their declared fields, so the
+// fixture cannot drift from itself.
+func TestContractExamplesCarryTheirDeclaredFields(t *testing.T) {
+	contract := loadContract(t)
+	getStatus := contract.Endpoints.GetStatus
+	charge := contract.Endpoints.ChargePaymentMethod
+
+	assertSameFields(t, "getStatus.savedCardExample", jsonKeys(t, getStatus.SavedCardExample), getStatus.Fields)
+	var saved struct {
+		PaymentMethod json.RawMessage `json:"paymentMethod"`
+	}
+	if err := json.Unmarshal(getStatus.SavedCardExample, &saved); err != nil {
+		t.Fatalf("savedCardExample: %v", err)
+	}
+	assertSameFields(t, "getStatus.savedCardExample.paymentMethod", jsonKeys(t, saved.PaymentMethod), getStatus.PaymentMethodFields)
+	assertSameFields(t, "chargePaymentMethod.successExample", jsonKeys(t, charge.SuccessExample), charge.Fields)
+	assertSameFields(t, "chargePaymentMethod.declinedExample", jsonKeys(t, charge.DeclinedExample), charge.Fields)
+}
+
+func jsonKeys(t *testing.T, raw json.RawMessage) []string {
+	t.Helper()
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		t.Fatalf("not a JSON object: %v", err)
+	}
+	keys := make([]string, 0, len(object))
+	for key := range object {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func contains(list []string, value string) bool {
+	for _, item := range list {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }
