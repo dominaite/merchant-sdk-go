@@ -47,11 +47,16 @@ const (
 	// session; GET SessionsPath + "/{transactionId}" reads its status.
 	SessionsPath = "/merchant-api/checkout/sessions"
 
+	// PaymentMethodsPath is the canonical path of stored payment methods. POST
+	// PaymentMethodsPath + "/{paymentMethodId}/charges" charges one; DELETE
+	// PaymentMethodsPath + "/{paymentMethodId}" revokes it.
+	PaymentMethodsPath = "/merchant-api/payment-methods"
+
 	// PingPath is the credentials-and-clock smoke test. It creates nothing.
 	PingPath = "/merchant-api/ping"
 
 	// Version is this SDK's version, reported in the User-Agent.
-	Version = "0.1.2"
+	Version = "0.3.0"
 
 	defaultTimeout = 45 * time.Second // serverless cold starts hit 10+s on dev; 15s was a coin flip
 
@@ -63,6 +68,12 @@ const (
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// A payment method id is opaque (pm_...), so this only pins what keeps it a
+// single path segment: no slash, no query, no whitespace, nothing that needs
+// percent-encoding. The id goes into the signed canonical path verbatim, so
+// anything else would sign one path and request another.
+var paymentMethodIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`)
 
 // Client is a server-side client for the Dominaite merchant API. It is safe for
 // concurrent use.
@@ -416,6 +427,12 @@ func (c *Client) CreateCheckoutSessionWithRetry(ctx context.Context, params Crea
 // Treat any status you do not recognise as still-open too: a value the API adds later
 // should make you keep polling, never silently close a live order.
 //
+// StoredPaymentMethod is the card kept on file by a session created with
+// SaveCard: present once the payment is approved (and it stays after a revoke,
+// with Status revoked), nil until then, for sessions without SaveCard and for
+// declined or abandoned ones. Its ID is what ChargePaymentMethod and
+// RevokePaymentMethod take.
+//
 // Poll after the payer returns to you, or on your order timeout. Not in a tight
 // loop: the endpoint is rate limited per key (60/min per key, 120/min per IP),
 // and going over returns a *RateLimitError.
@@ -440,40 +457,116 @@ func (c *Client) GetStatus(ctx context.Context, transactionID string) (*Checkout
 	return status, nil
 }
 
+// ChargePaymentMethod charges a card kept on file, off-session: no widget, no
+// payer present.
+//
+// paymentMethodID is the ID from GetStatus().StoredPaymentMethod of a session
+// you created with SaveCard. The charge is signed like a session and carries
+// an Idempotency-Key (auto-generated unless you set one), so retrying after a
+// timeout WITH THE SAME KEY never charges the card twice: the gateway replays
+// its first answer, HTTP status included.
+//
+// The HTTP status is the contract on this route. 201 (200 on a replay) returns
+// the charge, Status ChargeStatusSucceeded, ChargeStatusPending or
+// ChargeStatusCancelled. 402 returns the charge too: a decline is not an
+// error, the charge has Status ChargeStatusFailed plus a DeclineClass telling
+// you whether to give up on the card (hard), wait (soft_funds, soft_other) or
+// bring the customer back for a hosted session (soft_sca_required).
+// ChargeStatusPending is not terminal - poll GetStatus(charge.TransactionID).
+//
+// Errors it returns:
+//   - *ValidationError: bad arguments; nothing was sent.
+//   - *ChargeError: 409, 422, 502 or 503 with a code; branch on ErrorCode.
+//     CHARGE_OUTCOME_UNKNOWN carries the charge row (Charge, TransactionID):
+//     poll GetStatus with it, never retry under a new key.
+//   - *AuthError: wrong credentials, bad signature, clock off, IP not allowlisted.
+//   - *APIError: 404 for an id that is not yours (ErrorCode
+//     PAYMENT_METHOD_NOT_FOUND), 400 validation, or an unexpected response;
+//     inspect HTTPStatus.
+//   - *RateLimitError: HTTP 429; back off and reschedule with the same key.
+//   - *TransportError: network failure or a 5xx without a code. Safe to retry
+//     WITH the same key.
+func (c *Client) ChargePaymentMethod(ctx context.Context, paymentMethodID string, params ChargePaymentMethodParams) (*PaymentMethodCharge, error) {
+	id, err := normalizePaymentMethodID(paymentMethodID)
+	if err != nil {
+		return nil, err
+	}
+	idempotencyKey, body, err := prepareChargeRequest(params)
+	if err != nil {
+		return nil, err
+	}
+
+	reply, err := c.send(ctx, http.MethodPost, PaymentMethodsPath+"/"+id+"/charges", body, idempotencyKey)
+	if err != nil {
+		return nil, err
+	}
+
+	charge := reply.charge()
+	code := reply.err.code()
+
+	// 201 (200 on a durable replay): the charge was placed, whatever its
+	// status. 402: the provider declined; the envelope says success=false but
+	// the charge is right there, Status failed with its decline class, so it
+	// is a result, not an error.
+	if charge != nil && (reply.success() || reply.status == http.StatusPaymentRequired) {
+		return charge, nil
+	}
+
+	if code != "" && reply.status >= 400 && !isGenericFailureStatus(reply.status) {
+		return nil, newChargeError(reply.status, code, firstNonEmpty(reply.err.message(), "The charge was refused."), charge, reply.envelope)
+	}
+	if reply.status >= 400 {
+		return nil, reply.rejection()
+	}
+	return nil, newAPIError(reply.status, "The API answered the charge without a charge body")
+}
+
+// RevokePaymentMethod revokes a card kept on file. The saved credential is
+// deleted at the payment provider and the method's status becomes
+// StoredPaymentMethodStatusRevoked; a later ChargePaymentMethod on it is
+// refused with PAYMENT_METHOD_NOT_ACTIVE. Returns nil on success (HTTP 204),
+// and again for an already revoked method, so retrying a timed-out revoke is
+// safe. Not a payment operation: no idempotency key is signed.
+//
+// Errors it returns:
+//   - *RevokeError: the gateway refused and nothing changed;
+//     MERCHANT_API_UNAVAILABLE (503, retry later) or UPSTREAM_CONTRACT_ERROR
+//     (502, the provider refused for good - contact support with the id).
+//   - *APIError: 404 for an id that is not yours, or an unexpected response.
+//   - *AuthError, *RateLimitError, *TransportError: as everywhere else.
+func (c *Client) RevokePaymentMethod(ctx context.Context, paymentMethodID string) error {
+	id, err := normalizePaymentMethodID(paymentMethodID)
+	if err != nil {
+		return err
+	}
+
+	// DELETE signs an EMPTY idempotency key and an EMPTY body, like GET, and
+	// sends no Idempotency-Key header.
+	reply, err := c.send(ctx, http.MethodDelete, PaymentMethodsPath+"/"+id, "", "")
+	if err != nil {
+		return err
+	}
+	if reply.status < 400 {
+		return nil
+	}
+
+	code := reply.err.code()
+	if code != "" && !isGenericFailureStatus(reply.status) {
+		return newRevokeError(reply.status, code, firstNonEmpty(reply.err.message(), "The revoke was refused."), reply.envelope)
+	}
+	return reply.rejection()
+}
+
 // prepareSessionRequest validates the params and returns the idempotency key and
 // the exact body bytes that will be both signed and sent.
 func prepareSessionRequest(params CreateCheckoutSessionParams) (string, string, error) {
-	if params.Amount <= 0 {
-		return "", "", newValidationError("amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR)")
-	}
-	if strings.TrimSpace(params.Currency) == "" {
-		return "", "", newValidationError("Missing required parameter: currency")
-	}
-	if strings.TrimSpace(params.OrderReference) == "" {
-		return "", "", newValidationError("Missing required parameter: orderReference")
-	}
-	// Characters, not bytes. len() would count UTF-8 bytes and reject a
-	// perfectly valid 60-character Cyrillic or CJK order reference at the
-	// client, before the API ever got a say.
-	//
-	// The server counts UTF-16 code units, so an astral character (emoji, rare
-	// CJK) is one here and two there. The gap only shows up within a few
-	// characters of the limit, and the API stays the final arbiter: when it
-	// disagrees it answers with a 400 the caller already handles.
-	if utf8.RuneCountInString(params.OrderReference) > 100 {
-		return "", "", newValidationError("orderReference must be at most 100 characters")
+	if err := validateMoneyParams(params.Amount, params.Currency, params.OrderReference); err != nil {
+		return "", "", err
 	}
 
-	idempotencyKey := params.IdempotencyKey
-	if idempotencyKey == "" {
-		key, err := newIdempotencyKey()
-		if err != nil {
-			return "", "", err
-		}
-		idempotencyKey = key
-	}
-	if utf8.RuneCountInString(idempotencyKey) > 100 {
-		return "", "", newValidationError("idempotencyKey must be a non-empty string of at most 100 characters")
+	idempotencyKey, err := normalizeIdempotencyKey(params.IdempotencyKey)
+	if err != nil {
+		return "", "", err
 	}
 
 	// marshalNoEscape, not json.Marshal: the latter re-escapes the bytes
@@ -487,9 +580,182 @@ func prepareSessionRequest(params CreateCheckoutSessionParams) (string, string, 
 	return idempotencyKey, string(body), nil
 }
 
-// request signs and sends one call, and maps the response onto the error
-// taxonomy. body and idempotencyKey are both empty for GET.
+// prepareChargeRequest is prepareSessionRequest for a charge: same money
+// checks, same key handling, and the body is exactly the contract's fields in
+// declaration order, which is what gets signed.
+func prepareChargeRequest(params ChargePaymentMethodParams) (string, string, error) {
+	if err := validateMoneyParams(params.Amount, params.Currency, params.OrderReference); err != nil {
+		return "", "", err
+	}
+
+	idempotencyKey, err := normalizeIdempotencyKey(params.IdempotencyKey)
+	if err != nil {
+		return "", "", err
+	}
+
+	body, err := marshalNoEscape(params)
+	if err != nil {
+		return "", "", newValidationError("Request parameters are not JSON-encodable: " + err.Error())
+	}
+
+	return idempotencyKey, string(body), nil
+}
+
+// validateMoneyParams runs the checks shared by every request that moves
+// money: amount, currency, orderReference.
+func validateMoneyParams(amount int64, currency, orderReference string) error {
+	if amount <= 0 {
+		return newValidationError("amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR)")
+	}
+	if strings.TrimSpace(currency) == "" {
+		return newValidationError("Missing required parameter: currency")
+	}
+	if strings.TrimSpace(orderReference) == "" {
+		return newValidationError("Missing required parameter: orderReference")
+	}
+	// Characters, not bytes. len() would count UTF-8 bytes and reject a
+	// perfectly valid 60-character Cyrillic or CJK order reference at the
+	// client, before the API ever got a say.
+	//
+	// The server counts UTF-16 code units, so an astral character (emoji, rare
+	// CJK) is one here and two there. The gap only shows up within a few
+	// characters of the limit, and the API stays the final arbiter: when it
+	// disagrees it answers with a 400 the caller already handles.
+	if utf8.RuneCountInString(orderReference) > 100 {
+		return newValidationError("orderReference must be at most 100 characters")
+	}
+	return nil
+}
+
+// normalizeIdempotencyKey mints a key when none was given and bounds the one
+// that was.
+func normalizeIdempotencyKey(idempotencyKey string) (string, error) {
+	if idempotencyKey == "" {
+		key, err := newIdempotencyKey()
+		if err != nil {
+			return "", err
+		}
+		idempotencyKey = key
+	}
+	if utf8.RuneCountInString(idempotencyKey) > 100 {
+		return "", newValidationError("idempotencyKey must be a non-empty string of at most 100 characters")
+	}
+	return idempotencyKey, nil
+}
+
+// normalizePaymentMethodID refuses anything that would not survive as one path
+// segment of the signed canonical path.
+func normalizePaymentMethodID(paymentMethodID string) (string, error) {
+	normalized := strings.TrimSpace(paymentMethodID)
+	if !paymentMethodIDPattern.MatchString(normalized) {
+		return "", newValidationError("paymentMethodId must be the id from GetStatus().StoredPaymentMethod")
+	}
+	return normalized, nil
+}
+
+// request signs and sends one call, and applies the generic failure rules:
+// 5xx is a *TransportError, 4xx an *APIError. body and idempotencyKey are both
+// empty for GET and DELETE.
 func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey string) (json.RawMessage, error) {
+	reply, err := c.send(ctx, method, path, body, idempotencyKey)
+	if err != nil {
+		return nil, err
+	}
+	if reply.status >= 400 {
+		return nil, reply.rejection()
+	}
+
+	// 204 carries nothing to parse; the status is the whole answer.
+	if reply.status == http.StatusNoContent {
+		return nil, nil
+	}
+
+	// A 2xx has to be real JSON: the callers unmarshal it into a session, a
+	// status, a charge or a ping, and there is nothing to retry.
+	if !reply.parsed {
+		return nil, newAPIError(reply.status, "The API returned a non-JSON response")
+	}
+
+	return reply.payload, nil
+}
+
+// response is one parsed reply: the status, the whole envelope, the data
+// object when the envelope carried one, the unwrapped payload (data when
+// present, the envelope otherwise) and the envelope's error object. parsed is
+// false when the body was not a JSON object.
+type response struct {
+	status   int
+	envelope json.RawMessage
+	data     json.RawMessage
+	payload  json.RawMessage
+	err      *envelopeError
+	parsed   bool
+}
+
+// success reads the envelope's success flag; false when absent or unparsed.
+func (r *response) success() bool {
+	var probe struct {
+		Success *bool `json:"success"`
+	}
+	if !r.parsed || json.Unmarshal(r.envelope, &probe) != nil {
+		return false
+	}
+	return probe.Success != nil && *probe.Success
+}
+
+// charge reads the charge row under data, when the envelope carries one.
+func (r *response) charge() *PaymentMethodCharge {
+	if !isJSONObject(r.data) {
+		return nil
+	}
+	charge := &PaymentMethodCharge{Raw: r.data}
+	if json.Unmarshal(r.data, charge) != nil || charge.ChargeID == "" {
+		return nil
+	}
+	return charge
+}
+
+// rejection is the generic reading of a failed reply: 5xx is the API being
+// unavailable, 4xx a rejection carrying the machine-readable code.
+func (r *response) rejection() error {
+	if r.status >= 500 {
+		return newTransportError(
+			fmt.Sprintf("The Dominaite API is unavailable (HTTP %d); retry with the same idempotency key.", r.status),
+			nil,
+		)
+	}
+	var inner struct {
+		ErrorCode    string `json:"errorCode"`
+		ErrorMessage string `json:"errorMessage"`
+	}
+	if r.parsed {
+		_ = json.Unmarshal(r.payload, &inner)
+	}
+	apiErr := newAPIError(r.status, firstNonEmpty(inner.ErrorMessage, r.err.message(), "Request rejected"))
+	// Input rejections name a machine-readable code the same way refusals
+	// do; carry it so callers branch on the code, not on the message text.
+	apiErr.ErrorCode = firstNonEmpty(inner.ErrorCode, r.err.code())
+	return apiErr
+}
+
+// isGenericFailureStatus names the statuses that keep their generic error on
+// every route: validation (400), authentication (401, 403), an id that is not
+// yours (404) and rate limiting (429). Any other failure that carries an error
+// code on a payment-method route is that route's typed error; without a code
+// a 5xx stays the retryable *TransportError.
+func isGenericFailureStatus(status int) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusTooManyRequests:
+		return true
+	}
+	return false
+}
+
+// send signs, sends and parses one call. Transport failures, redirects, 401/403
+// and 429 come back as errors here; every other status comes back as a reply
+// for the route to read, because the payment-method routes answer 402, 409,
+// 422, 502 and 503 with a body the caller needs.
+func (c *Client) send(ctx context.Context, method, path, body, idempotencyKey string) (*response, error) {
 	if ctx == nil {
 		return nil, newValidationError("ctx must not be nil")
 	}
@@ -573,11 +839,6 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 	}
 
 	switch {
-	case resp.StatusCode >= 500:
-		return nil, newTransportError(
-			fmt.Sprintf("The Dominaite API is unavailable (HTTP %d); retry with the same idempotency key.", resp.StatusCode),
-			nil,
-		)
 	case resp.StatusCode == http.StatusTooManyRequests:
 		rateErr := newRateLimitError(fmt.Sprintf(
 			"Rate limited by the Dominaite API (HTTP %d). Slow down and retry later with the same idempotency key.",
@@ -589,22 +850,16 @@ func (c *Client) request(ctx context.Context, method, path, body, idempotencyKey
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		code := firstNonEmpty(inner.ErrorCode, envelope.Error.code(), "UNAUTHORIZED")
 		return nil, newAuthError(code, "Authentication failed - check your key id, secret, and server clock.")
-	case resp.StatusCode >= 400:
-		message := firstNonEmpty(inner.ErrorMessage, envelope.Error.message(), "Request rejected")
-		apiErr := newAPIError(resp.StatusCode, message)
-		// Input rejections name a machine-readable code the same way refusals
-		// do; carry it so callers branch on the code, not on the message text.
-		apiErr.ErrorCode = firstNonEmpty(inner.ErrorCode, envelope.Error.code())
-		return nil, apiErr
 	}
 
-	// A 2xx has to be real JSON: the callers unmarshal it into a session, a
-	// status or a ping, and there is nothing to retry.
-	if !parsedJSON {
-		return nil, newAPIError(resp.StatusCode, "The API returned a non-JSON response")
-	}
-
-	return payload, nil
+	return &response{
+		status:   resp.StatusCode,
+		envelope: json.RawMessage(raw),
+		data:     envelope.Data,
+		payload:  payload,
+		err:      envelope.Error,
+		parsed:   parsedJSON,
+	}, nil
 }
 
 // readLimited reads a response body up to maxResponseBytes. A body that runs

@@ -464,6 +464,102 @@ with the same order-derived idempotency key: within a few minutes of expiry that
 `DUPLICATE_REQUEST` (retry the same key shortly), and past that it succeeds with a fresh
 session. See [Recovering from a replay refusal](#recovering-from-a-replay-refusal).
 
+## Stored payment methods (recurring)
+
+Set `SaveCard: true` when you create a session and, once that payment is approved, the gateway
+keeps the card on file. You never see the card number or the provider token: `GetStatus` returns a
+`StoredPaymentMethod` with an opaque `ID` (`pm_` + 32 hex characters), the `Brand`, the `Last4` and
+the expiry, and that `ID` is what you charge and revoke with. Store it against your customer. (The
+gateway's `paymentMethod` field on the same status is something else: the string category of how
+the payer paid, `card`, `wallet` and so on; it is only reachable through `Raw`.)
+
+```go
+session, err := client.CreateCheckoutSession(ctx, dominaite.CreateCheckoutSessionParams{
+	Amount:         2500,
+	Currency:       "EUR",
+	OrderReference: "sub-8817-first",
+	SaveCard:       true,
+})
+// ... the payer completes the hosted checkout ...
+status, err := client.GetStatus(ctx, session.TransactionID)
+if status.Status == dominaite.StatusSucceeded && status.StoredPaymentMethod != nil &&
+	status.StoredPaymentMethod.Status == dominaite.StoredPaymentMethodStatusActive {
+	db.SaveCard(customerID, status.StoredPaymentMethod.ID) // pm_...
+}
+
+// Later, off-session, no payer present:
+charge, err := client.ChargePaymentMethod(ctx, paymentMethodID, dominaite.ChargePaymentMethodParams{
+	Amount:         2500,
+	Currency:       "EUR",
+	OrderReference: "sub-8817-2026-10",
+	Description:    "Monthly plan, October",
+	IdempotencyKey: "sub-8817-2026-10", // derive it from the billing period, never random per attempt
+})
+var chargeErr *dominaite.ChargeError
+if errors.As(err, &chargeErr) {
+	switch chargeErr.ErrorCode {
+	case dominaite.ChargeErrorOutcomeUnknown:
+		// 502: the provider gave no verdict, the charge MAY have happened. Never retry
+		// under a new key: poll the transaction the gateway attached instead.
+		return pollUntilSettled(ctx, chargeErr.TransactionID)
+	case dominaite.ChargeErrorDuplicateRequest, dominaite.ChargeErrorChargesDisabled, dominaite.ChargeErrorProcessingUnavailable:
+		// Nothing was charged; retry later with the SAME idempotency key.
+	case dominaite.ChargeErrorPaymentMethodNotActive:
+		// Revoked or expired: bring the customer back for a hosted session with SaveCard.
+	case dominaite.ChargeErrorFailed:
+		// 502, nothing was charged. chargeErr.Charge is set when a row exists.
+	case dominaite.ChargeErrorIdempotencyKeyReused:
+		// Same key, different body or method: a bug on your side.
+	}
+	return err
+}
+if err != nil {
+	return err // not yours (404), validation, auth, rate limit, transport - see Errors
+}
+
+switch charge.Status {
+case dominaite.ChargeStatusSucceeded:
+case dominaite.ChargeStatusPending:
+	// Not terminal. Poll GetStatus(charge.TransactionID), or wait for the webhook.
+case dominaite.ChargeStatusFailed:
+	// HTTP 402 from the gateway, but not an error: branch on the class, log the code.
+	// DeclineClassHard            - give up on this card, ask the customer for another one
+	// DeclineClassSoftFunds       - insufficient funds, retry later (not in a loop)
+	// DeclineClassSoftSCARequired - the issuer wants the customer present: send them through a
+	//                               hosted session with SaveCard and charge the new method
+	// DeclineClassSoftOther       - transient, one retry later is reasonable
+	handleDecline(charge.DeclineClass, charge.DeclineCode)
+case dominaite.ChargeStatusCancelled:
+	// An authorization voided before capture; no money moved.
+}
+
+// When the customer removes the card:
+err = client.RevokePaymentMethod(ctx, paymentMethodID) // 204, returns nil; 204 again if already revoked
+var revokeErr *dominaite.RevokeError
+if errors.As(err, &revokeErr) && revokeErr.ErrorCode == dominaite.RevokeErrorMerchantAPIUnavailable {
+	// 503: nothing changed, retry later.
+} else if revokeErr != nil {
+	// 502 UPSTREAM_CONTRACT_ERROR: the provider refused for good, nothing changed. Contact support with the id.
+}
+```
+
+A charge is signed exactly like a session and carries an `Idempotency-Key`, so a retry after a
+timeout with the **same** key never charges the card twice: the gateway replays its first answer,
+HTTP status included. The HTTP status is the contract on this route: 201 (or 200 on a replay)
+returns the charge, 402 returns the charge too (`Status` `failed` plus `DeclineClass`), and 409,
+422, 502 and 503 return a `*ChargeError` with `ErrorCode`, `HTTPStatus`, the gateway's message
+and, when the gateway attached the charge row, `Charge` and `TransactionID`. Only authentication
+(401/403), an id that is not yours (404, `*APIError` with `ErrorCode` `PAYMENT_METHOD_NOT_FOUND`),
+validation (400, `*APIError`), rate limiting (429) and network failures or a 5xx without a code
+keep their generic errors. `DeclineClass` and `DeclineCode` are empty unless the charge was
+declined; the gateway omits them on the wire.
+
+Revoking signs an empty key and an empty body, like `GetStatus`. A revoke that fails with
+`*RevokeError` changed nothing: `MERCHANT_API_UNAVAILABLE` (503) is retryable,
+`UPSTREAM_CONTRACT_ERROR` (502) is not. After a revoke the status read keeps the
+`StoredPaymentMethod` with `Status` `revoked`, and a charge against it is refused with
+`PAYMENT_METHOD_NOT_ACTIVE`. An id that is not yours is an `*APIError` with `HTTPStatus` 404.
+
 ## Status polling (fallback, and the reconciliation sweep)
 
 **Prefer webhooks for learning that a payment resolved.** Polling is the right tool for three
@@ -517,9 +613,11 @@ For the specific kind, use `errors.As` with the concrete pointer type:
 | Error | When | What to do |
 |---|---|---|
 | `*RefusalError` | The API answered with `success: false`. `ErrorCode` carries the reason. | Branch on `ErrorCode`. Do not blind-retry. |
+| `*ChargeError` | `ChargePaymentMethod` answered 409, 422, 502 or 503 with a code; `ErrorCode`, `HTTPStatus`, and `Charge`/`TransactionID` when the gateway attached the charge row. | Branch on `ErrorCode`; see [Stored payment methods](#stored-payment-methods-recurring). `CHARGE_OUTCOME_UNKNOWN`: poll `TransactionID`, never retry under a new key. |
+| `*RevokeError` | `RevokePaymentMethod` answered 502 (`UPSTREAM_CONTRACT_ERROR`) or 503 (`MERCHANT_API_UNAVAILABLE`). Nothing changed. | 503: retry later. 502: contact support with the id. |
 | `*AuthError` | 401/403. `ErrorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
 | `*RateLimitError` | 429. `RetryAfterSeconds` carries the `Retry-After` header when the API sent one as integer seconds; `HasRetryAfter` tells "wait 0s" apart from "the API did not say". | Back off, then reschedule with the **same** idempotency key. The SDK never retries this for you. |
-| `*TransportError` | Network failure, timeout, or 5xx (`MERCHANT_API_UNAVAILABLE`). Wraps the cause, reachable with `errors.Unwrap`. A 5xx classifies on the status, so an HTML or empty error page from an overloaded edge is still retryable. | Retry with the **same** idempotency key. |
+| `*TransportError` | Network failure, timeout, or a 5xx without a code the SDK models. Wraps the cause, reachable with `errors.Unwrap`. A 5xx classifies on the status, so an HTML or empty error page from an overloaded edge is still retryable. | Retry with the **same** idempotency key. |
 | `*APIError` | Any other rejecting or unexpected response; `HTTPStatus` carries the code. | Inspect. A 3xx means a proxy or a wrong base URL answered with a redirect - the SDK never follows one. A replayed idempotency key does not land here; it comes back as a `*RefusalError`. |
 | `*ValidationError` | Bad arguments (non-positive amount, missing field, malformed key id). | Fix the call; nothing was sent. |
 | `*WebhookVerificationError` | `VerifyWebhook` rejected an inbound delivery; `Reason` carries which check failed. | Answer 400 with no detail. See [Webhooks](#rejections). |
