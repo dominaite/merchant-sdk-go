@@ -59,7 +59,7 @@ const (
 	PingPath = "/merchant-api/ping"
 
 	// Version is this SDK's version, reported in the User-Agent.
-	Version = "1.0.0"
+	Version = "0.3.0"
 
 	defaultTimeout = 45 * time.Second // serverless cold starts hit 10+s on dev; 15s was a coin flip
 

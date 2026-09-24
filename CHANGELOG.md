@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0 (unreleased)
+## 0.3.0 (unreleased)
 
 ### Breaking
 
@@ -14,7 +14,7 @@
   it from the billing period). Never generate a fresh key per call: the same order at the same
   amount must replay the open session.
 
-The module path does not change: Go puts the major version in the path only from v2 on.
+The module path does not change; this ships as tag `v0.3.0`.
 
 ### Added
 
