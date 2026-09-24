@@ -41,12 +41,15 @@ func (e baseError) Is(target error) bool { return target == ErrDominaite }
 // RefusalError means the gateway understood the request but refused to open a
 // checkout session. The API answered with success: false.
 //
-// Branch on ErrorCode:
+// Branch on ErrorCode (the ErrorCode* constants):
 //   - PAYMENT_PROCESSING_UNAVAILABLE: card payments are off right now; retry later.
-//   - DUPLICATE_REQUEST: a session for this idempotency key is already open.
+//   - DUPLICATE_REQUEST: a session for this idempotency key exists but cannot
+//     be handed back yet; re-POST the same key shortly.
 //   - ALREADY_PROCESSED: this idempotency key's payment already completed.
 //   - PRIOR_ATTEMPT_FAILED: a prior attempt with this key failed terminally; use a fresh key.
-//   - IDEMPOTENCY_KEY_REUSED: same key sent with a DIFFERENT body; use a fresh key.
+//   - IDEMPOTENCY_KEY_REUSED: same key sent with a different amount, currency
+//     or card-saving choice; a re-priced order needs a new key.
+//   - STOREFRONT_MISMATCH: the key was first used for a different storefront.
 //
 // On a replay refusal the API also names WHICH payment your key collided with, on
 // TransactionID. That is the recovery path - read it back with GetStatus to find out
@@ -73,6 +76,53 @@ type RefusalError struct {
 	// Raw is the unparsed refusal payload, for fields not modelled above.
 	Raw json.RawMessage
 }
+
+// Error codes the checkout session route answers with, for branching on the
+// ErrorCode of a *RefusalError or an *APIError instead of on message text.
+// The same strings can also arrive on a *ChargeError (see the ChargeError*
+// constants for what they mean there).
+//
+// The storefront codes mean the session was refused because of the online
+// location (storefront) it would be filed under. They arrive as an *APIError
+// with HTTPStatus set, not as a refusal, and a retry will not change them:
+//
+//	var apiErr *dominaite.APIError
+//	if errors.As(err, &apiErr) && apiErr.ErrorCode == dominaite.ErrorCodeStorefrontNotWhitelisted {
+//		// the site's domain is not whitelisted with the payment provider yet
+//	}
+const (
+	// ErrorCodeStorefrontNotWhitelisted (HTTP 409): the storefront's domain is
+	// not whitelisted with the payment provider yet, and the environment
+	// requires it. Nothing was minted. Ask Dominaite support to finish the
+	// domain whitelisting; retrying will not help until then.
+	ErrorCodeStorefrontNotWhitelisted = "STOREFRONT_NOT_WHITELISTED"
+	// ErrorCodeStorefrontInactive (HTTP 409): the storefront was deactivated
+	// or deleted. Reactivate it in the dashboard or use another one.
+	ErrorCodeStorefrontInactive = "STOREFRONT_INACTIVE"
+	// ErrorCodeStorefrontMismatch (HTTP 400): the API key is bound to one
+	// storefront and the request named another. A replay of a key minted for
+	// a different storefront answers the same code as a *RefusalError.
+	ErrorCodeStorefrontMismatch = "STOREFRONT_MISMATCH"
+
+	// ErrorCodeAlreadyProcessed (refusal): the payment for this idempotency
+	// key already moved money. Mark the order paid; the key is spent.
+	ErrorCodeAlreadyProcessed = "ALREADY_PROCESSED"
+	// ErrorCodePriorAttemptFailed (refusal): the attempt for this key ended
+	// failed, cancelled or abandoned. The key is spent; try again under a
+	// new one.
+	ErrorCodePriorAttemptFailed = "PRIOR_ATTEMPT_FAILED"
+	// ErrorCodeDuplicateRequest (refusal): a session for this key exists but
+	// cannot be handed back yet. Re-POST the SAME key after about a second.
+	ErrorCodeDuplicateRequest = "DUPLICATE_REQUEST"
+	// ErrorCodePaymentProcessingUnavailable (refusal on session create; 503 on
+	// a charge): card payments are off right now. Nothing was minted or
+	// charged; retry later with the SAME key.
+	ErrorCodePaymentProcessingUnavailable = "PAYMENT_PROCESSING_UNAVAILABLE"
+	// ErrorCodeIdempotencyKeyReused (refusal): this key was first used for a
+	// different amount, currency or card-saving choice. A re-priced order
+	// needs a new key; OrderIdempotencyKey derives one.
+	ErrorCodeIdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED"
+)
 
 // AuthError means the API rejected your credentials or signature (HTTP 401/403).
 // Not retryable: fix the key id, the secret, the server clock, or the caller
@@ -239,7 +289,9 @@ type RevokeError struct {
 // ErrorCode is the machine-readable code when the API sent one, so input
 // rejections can be branched on rather than string-matched. A 400 carrying
 // IDEMPOTENCY_KEY_REQUIRED means the Idempotency-Key header was missing or
-// empty. Empty when the API named no code.
+// empty. A 409 carrying ErrorCodeStorefrontNotWhitelisted or
+// ErrorCodeStorefrontInactive, or a 400 carrying ErrorCodeStorefrontMismatch,
+// means the storefront refused the session. Empty when the API named no code.
 type APIError struct {
 	baseError
 	HTTPStatus int
