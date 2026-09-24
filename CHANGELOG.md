@@ -1,17 +1,20 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 1.0.0 (unreleased)
 
 ### Breaking
 
 - `IdempotencyKey` is required on `CreateCheckoutSession`, `CreateCheckoutSessionWithRetry` and
-  `ChargePaymentMethod`. The SDK no longer generates a random key when it is empty; an empty or
-  blank key is a `*ValidationError` and nothing is sent.
+  `ChargePaymentMethod`, and must be 1 to 100 visible ASCII characters (`0x21` to `0x7E`). The
+  SDK no longer generates a random key; an empty, blank, too long or non-ASCII key is a
+  `*ValidationError` and nothing is sent.
 
-  Migration: set `IdempotencyKey` on every call, derived from the order with
-  `dominaite.OrderIdempotencyKey("checkout", orderID, amountMinor, currency)` (for charges,
-  derive it from the billing period). Never generate a fresh key per call: the same order at the
-  same amount must replay the open session.
+  Migration: set `IdempotencyKey` on every call with
+  `dominaite.OrderIdempotencyKey("checkout", orderID, amountMinor, currency)` (for charges, derive
+  it from the billing period). Never generate a fresh key per call: the same order at the same
+  amount must replay the open session.
+
+The module path does not change: Go puts the major version in the path only from v2 on.
 
 ### Added
 
@@ -20,9 +23,12 @@
   `STOREFRONT_MISMATCH` (400), `ALREADY_PROCESSED`, `PRIOR_ATTEMPT_FAILED`, `DUPLICATE_REQUEST`,
   `PAYMENT_PROCESSING_UNAVAILABLE`, `IDEMPOTENCY_KEY_REUSED`. Storefront refusals arrive as an
   `*APIError` with `HTTPStatus` and `ErrorCode`.
-- `ToMinorUnits` and `CurrencyExponent`: exact decimal string to minor units by ISO 4217
-  exponent.
+- `ToMinorUnits` and `CurrencyExponent`: exact decimal string to minor units by the gateway's
+  currency table. HUF is whole forints (0 decimals, unlike ISO 4217). ISK, KRW, OMR, JOD and TND
+  are refused as not supported.
 - `IsPaid` and `IsTerminal` status helpers.
+- `CreateCheckoutSessionWithRetry` also retries the HTTP 200 refusal form of
+  `PAYMENT_PROCESSING_UNAVAILABLE`, with the same key.
 - Stored payment methods: `SaveCard`, `ChargePaymentMethod`, `RevokePaymentMethod`.
 
 ### Fixed
