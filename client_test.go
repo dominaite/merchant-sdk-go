@@ -600,6 +600,41 @@ func TestRetryGivesUpWithTheLastTransportError(t *testing.T) {
 	}
 }
 
+// A 503 that names PAYMENT_PROCESSING_UNAVAILABLE is still the API being
+// unavailable: the retry helper must retry it with the same key, whichever
+// spelling the code arrives in, and not stop on the code as if it were a
+// refusal.
+func TestRetryRetriesA503CarryingPaymentProcessingUnavailable(t *testing.T) {
+	bodies := map[string]any{
+		"flat errorCode": map[string]any{"success": false, "errorCode": ErrorCodePaymentProcessingUnavailable},
+		"envelope error": map[string]any{"success": false, "error": map[string]any{"code": ErrorCodePaymentProcessingUnavailable, "message": "Card payments are not available right now."}},
+	}
+	for form, body := range bodies {
+		t.Run(form, func(t *testing.T) {
+			server, calls := newTestServer(t, reply{Status: 503, Body: body}, successReply())
+			client := newTestClient(t, server.URL)
+
+			params := testParams()
+			session, err := client.CreateCheckoutSessionWithRetry(context.Background(), params, RetryOptions{Attempts: 3, BaseDelay: time.Millisecond})
+			if err != nil {
+				t.Fatalf("CreateCheckoutSessionWithRetry: %v", err)
+			}
+			if session.CashierKey != "ck_1" {
+				t.Fatalf("unexpected session: %+v", session)
+			}
+			recorded := calls()
+			if len(recorded) != 2 {
+				t.Fatalf("got %d attempts, want 2", len(recorded))
+			}
+			for i, call := range recorded {
+				if got := call.Header.Get("Idempotency-Key"); got != params.IdempotencyKey {
+					t.Fatalf("attempt %d used key %s, want %s", i, got, params.IdempotencyKey)
+				}
+			}
+		})
+	}
+}
+
 func TestAmountsMustBePositiveMinorUnits(t *testing.T) {
 	server, calls := newTestServer(t, successReply())
 	client := newTestClient(t, server.URL)
