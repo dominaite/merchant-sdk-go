@@ -168,6 +168,26 @@ var Statuses = []string{
 	StatusAbandoned,
 }
 
+// IsPaid reports whether a status means the payment is complete: true for
+// StatusSucceeded only. StatusRequiresCapture is not paid yet (the funds are
+// held, not captured), and neither is anything this SDK does not recognise.
+func IsPaid(status string) bool {
+	return status == StatusSucceeded
+}
+
+// IsTerminal reports whether a status is final, so polling can stop:
+// succeeded, failed, cancelled, abandoned, refunded and partially_refunded.
+// Everything else is still open and worth polling, including pending,
+// processing, requires_capture, disputed and any status this SDK does not
+// recognise: a value the API adds later must never close a live order.
+func IsTerminal(status string) bool {
+	switch status {
+	case StatusSucceeded, StatusFailed, StatusCancelled, StatusAbandoned, StatusRefunded, StatusPartiallyRefunded:
+		return true
+	}
+	return false
+}
+
 // checkoutSessionEnvelope is the create-session response as it arrives on the
 // wire. Business refusals come back as HTTP 200 with success false, so the
 // branch is on Success, not on the status code. Checkout is present only on
