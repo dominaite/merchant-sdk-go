@@ -444,18 +444,23 @@ the network. The amount is locked server-side - what you pass here is what gets 
 in the browser can change it.
 
 Prices usually live as decimals in your catalog. Convert them with `ToMinorUnits`, which does it
-exactly on the digits, never through a float, by the currency's ISO 4217 exponent:
+exactly on the digits, never through a float, by the exponent the **gateway** uses for the
+currency:
 
 ```go
 amount, err := dominaite.ToMinorUnits("0.30", "EUR") // 30
-amount, err = dominaite.ToMinorUnits("1500", "JPY")   // 1500 (JPY has no minor unit)
+amount, err = dominaite.ToMinorUnits("1500", "JPY")   // 1500 (no minor unit)
+amount, err = dominaite.ToMinorUnits("1500", "HUF")   // 1500 (whole forints, see below)
 amount, err = dominaite.ToMinorUnits("1.250", "KWD")  // 1250 (three decimals)
 ```
 
-It knows EUR, USD, GBP, BGN, RON, CHF, PLN, CZK, HUF, SEK, DKK, NOK (2 decimals), JPY, KRW, ISK
-(0) and BHD, KWD, OMR, JOD, TND (3); `CurrencyExponent` exposes the table. An unknown currency,
-a malformed amount (sign, comma, thousands separator) or more decimals than the currency allows
-(`"0.305"` EUR, `"100.0"` JPY) is a `*ValidationError`, never a silent rounding.
+It knows EUR, USD, GBP, CAD, AUD, CHF, BGN, RON, PLN, CZK, SEK, DKK, NOK (2 decimals), JPY and
+HUF (0), and BHD and KWD (3); `CurrencyExponent` exposes the table. HUF is whole forints on the
+gateway, although ISO 4217 gives it 2 decimals: send `1500` for 1500 Ft, not `150000`. ISK, KRW,
+OMR, JOD and TND are refused as not supported, because ISO 4217 and the gateway disagree on
+them and either reading would be off by 10x or 100x. An unknown currency, a malformed amount
+(sign, comma, thousands separator) or more decimals than the currency allows, zeros included
+(`"25.000"` EUR, `"100.0"` JPY), is a `*ValidationError`, never a silent rounding.
 
 ## Retries and double-charges
 
