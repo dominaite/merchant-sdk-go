@@ -518,7 +518,6 @@ func TestRetryReusesOneIdempotencyKey(t *testing.T) {
 	client := newTestClient(t, server.URL)
 
 	params := testParams()
-	params.IdempotencyKey = "" // let the SDK mint one, then pin it across attempts
 
 	session, err := client.CreateCheckoutSessionWithRetry(context.Background(), params, RetryOptions{Attempts: 3, BaseDelay: time.Millisecond})
 	if err != nil {
@@ -532,14 +531,27 @@ func TestRetryReusesOneIdempotencyKey(t *testing.T) {
 	if len(recorded) != 3 {
 		t.Fatalf("got %d attempts, want 3", len(recorded))
 	}
-	first := recorded[0].Header.Get("Idempotency-Key")
-	if first == "" {
-		t.Fatal("no idempotency key was sent")
-	}
 	for i, call := range recorded {
-		if got := call.Header.Get("Idempotency-Key"); got != first {
-			t.Fatalf("attempt %d used key %s, want the pinned %s", i, got, first)
+		if got := call.Header.Get("Idempotency-Key"); got != params.IdempotencyKey {
+			t.Fatalf("attempt %d used key %s, want the caller's %s", i, got, params.IdempotencyKey)
 		}
+	}
+}
+
+func TestRetryRefusesAMissingIdempotencyKeyBeforeSending(t *testing.T) {
+	server, calls := newTestServer(t, successReply())
+	client := newTestClient(t, server.URL)
+
+	params := testParams()
+	params.IdempotencyKey = ""
+
+	_, err := client.CreateCheckoutSessionWithRetry(context.Background(), params, RetryOptions{Attempts: 3, BaseDelay: time.Millisecond})
+	var validation *ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("got %v, want *ValidationError", err)
+	}
+	if len(calls()) != 0 {
+		t.Fatalf("sent %d requests without an idempotency key", len(calls()))
 	}
 }
 
@@ -582,6 +594,86 @@ func TestRetryGivesUpWithTheLastTransportError(t *testing.T) {
 	var transportErr *TransportError
 	if !errors.As(err, &transportErr) {
 		t.Fatalf("got %v, want *TransportError", err)
+	}
+	if len(calls()) != 2 {
+		t.Fatalf("got %d attempts, want 2", len(calls()))
+	}
+}
+
+// A 503 that names PAYMENT_PROCESSING_UNAVAILABLE is still the API being
+// unavailable: the retry helper must retry it with the same key, whichever
+// spelling the code arrives in, and not stop on the code as if it were a
+// refusal.
+func TestRetryRetriesA503CarryingPaymentProcessingUnavailable(t *testing.T) {
+	bodies := map[string]any{
+		"flat errorCode": map[string]any{"success": false, "errorCode": ErrorCodePaymentProcessingUnavailable},
+		"envelope error": map[string]any{"success": false, "error": map[string]any{"code": ErrorCodePaymentProcessingUnavailable, "message": "Card payments are not available right now."}},
+	}
+	for form, body := range bodies {
+		t.Run(form, func(t *testing.T) {
+			server, calls := newTestServer(t, reply{Status: 503, Body: body}, successReply())
+			client := newTestClient(t, server.URL)
+
+			params := testParams()
+			session, err := client.CreateCheckoutSessionWithRetry(context.Background(), params, RetryOptions{Attempts: 3, BaseDelay: time.Millisecond})
+			if err != nil {
+				t.Fatalf("CreateCheckoutSessionWithRetry: %v", err)
+			}
+			if session.CashierKey != "ck_1" {
+				t.Fatalf("unexpected session: %+v", session)
+			}
+			recorded := calls()
+			if len(recorded) != 2 {
+				t.Fatalf("got %d attempts, want 2", len(recorded))
+			}
+			for i, call := range recorded {
+				if got := call.Header.Get("Idempotency-Key"); got != params.IdempotencyKey {
+					t.Fatalf("attempt %d used key %s, want %s", i, got, params.IdempotencyKey)
+				}
+			}
+		})
+	}
+}
+
+// The session route answers PAYMENT_PROCESSING_UNAVAILABLE as an HTTP 200
+// refusal, and the contract marks it retryable: the helper retries it with the
+// same key, like the 503 form.
+func TestRetryRetriesTheRefusalFormOfPaymentProcessingUnavailable(t *testing.T) {
+	unavailable := reply{Body: map[string]any{
+		"success":      false,
+		"errorCode":    ErrorCodePaymentProcessingUnavailable,
+		"errorMessage": "Card payments are not available right now. Retry later with the same idempotency key.",
+	}}
+	server, calls := newTestServer(t, unavailable, unavailable, successReply())
+	client := newTestClient(t, server.URL)
+
+	params := testParams()
+	session, err := client.CreateCheckoutSessionWithRetry(context.Background(), params, RetryOptions{Attempts: 3, BaseDelay: time.Millisecond})
+	if err != nil {
+		t.Fatalf("CreateCheckoutSessionWithRetry: %v", err)
+	}
+	if session.CashierKey != "ck_1" {
+		t.Fatalf("unexpected session: %+v", session)
+	}
+	recorded := calls()
+	if len(recorded) != 3 {
+		t.Fatalf("got %d attempts, want 3", len(recorded))
+	}
+	for i, call := range recorded {
+		if got := call.Header.Get("Idempotency-Key"); got != params.IdempotencyKey {
+			t.Fatalf("attempt %d used key %s, want %s", i, got, params.IdempotencyKey)
+		}
+	}
+}
+
+func TestRetryGivesUpWithThePaymentProcessingUnavailableRefusal(t *testing.T) {
+	server, calls := newTestServer(t, reply{Body: map[string]any{"success": false, "errorCode": ErrorCodePaymentProcessingUnavailable}})
+	client := newTestClient(t, server.URL)
+
+	_, err := client.CreateCheckoutSessionWithRetry(context.Background(), testParams(), RetryOptions{Attempts: 2, BaseDelay: time.Millisecond})
+	var refusal *RefusalError
+	if !errors.As(err, &refusal) || refusal.ErrorCode != ErrorCodePaymentProcessingUnavailable {
+		t.Fatalf("got %v, want the PAYMENT_PROCESSING_UNAVAILABLE refusal", err)
 	}
 	if len(calls()) != 2 {
 		t.Fatalf("got %d attempts, want 2", len(calls()))
@@ -715,20 +807,27 @@ func TestContextCancellationIsATransportError(t *testing.T) {
 	}
 }
 
-func TestGeneratedIdempotencyKeysAreUniqueUUIDs(t *testing.T) {
-	seen := map[string]bool{}
-	for i := 0; i < 100; i++ {
-		key, err := newIdempotencyKey()
-		if err != nil {
-			t.Fatalf("newIdempotencyKey: %v", err)
-		}
-		if !uuidPattern.MatchString(key) {
-			t.Fatalf("not a UUID: %s", key)
-		}
-		if seen[key] {
-			t.Fatalf("duplicate idempotency key: %s", key)
-		}
-		seen[key] = true
+func TestCreateCheckoutSessionRequiresAnIdempotencyKey(t *testing.T) {
+	for name, key := range map[string]string{"empty": "", "blank": "   "} {
+		t.Run(name, func(t *testing.T) {
+			server, calls := newTestServer(t, successReply())
+			client := newTestClient(t, server.URL)
+
+			params := testParams()
+			params.IdempotencyKey = key
+
+			_, err := client.CreateCheckoutSession(context.Background(), params)
+			var validation *ValidationError
+			if !errors.As(err, &validation) {
+				t.Fatalf("got %v, want *ValidationError", err)
+			}
+			if !strings.Contains(validation.Message, "idempotencyKey") {
+				t.Fatalf("message %q does not name the missing key", validation.Message)
+			}
+			if len(calls()) != 0 {
+				t.Fatalf("sent %d requests without an idempotency key", len(calls()))
+			}
+		})
 	}
 }
 

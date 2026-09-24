@@ -268,22 +268,37 @@ func TestLengthLimitsCountCharactersNotBytes(t *testing.T) {
 	}
 }
 
-func TestIdempotencyKeyLimitCountsCharacters(t *testing.T) {
-	server, _ := newTestServer(t, successReply())
+// Keys are visible ASCII (0x21 to 0x7E), 1 to 100 of them. Anything else is
+// refused before a request is signed or sent.
+func TestIdempotencyKeysAreVisibleASCII(t *testing.T) {
+	server, calls := newTestServer(t, successReply())
 	client := newTestClient(t, server.URL)
 
 	params := testParams()
-	params.IdempotencyKey = strings.Repeat("é", 100) // 100 characters, 200 bytes
-
+	params.IdempotencyKey = "!" + strings.Repeat("a", 98) + "~" // both ends of the range, 100 characters
 	if _, err := client.CreateCheckoutSession(context.Background(), params); err != nil {
-		t.Fatalf("a 100-character idempotency key must be accepted: %v", err)
+		t.Fatalf("a 100-character visible-ASCII key must be accepted: %v", err)
 	}
 
-	params.IdempotencyKey = strings.Repeat("é", 101)
-	_, err := client.CreateCheckoutSession(context.Background(), params)
-	var validationErr *ValidationError
-	if !errors.As(err, &validationErr) {
-		t.Fatalf("101 characters: got %v, want *ValidationError", err)
+	for name, key := range map[string]string{
+		"inner space":   "order 1042",
+		"tab":           "order\t1042",
+		"newline":       "order\n1042",
+		"DEL":           "order\x7f1042",
+		"non-ASCII":     "поръчка-1042",
+		"accented":      strings.Repeat("é", 10),
+		"101 ASCII":     strings.Repeat("k", 101),
+		"leading space": " order-1042",
+	} {
+		params.IdempotencyKey = key
+		_, err := client.CreateCheckoutSession(context.Background(), params)
+		var validationErr *ValidationError
+		if !errors.As(err, &validationErr) {
+			t.Errorf("%s: got %v, want *ValidationError", name, err)
+		}
+	}
+	if len(calls()) != 1 {
+		t.Fatalf("sent %d requests, want only the valid one", len(calls()))
 	}
 }
 

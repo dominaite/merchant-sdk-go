@@ -41,9 +41,13 @@ type CreateCheckoutSessionParams struct {
 	// themselves never reach you: you get an id, a brand and the last four digits.
 	SaveCard bool `json:"saveCard,omitempty"`
 
-	// IdempotencyKey is auto-generated when empty. It travels in the header and
-	// in the signature, never in the body. Retrying with the same key never
-	// creates a second payment, so on a timeout retry with the same key.
+	// IdempotencyKey is required. Derive it from the order with
+	// OrderIdempotencyKey: the same order at the same amount must produce the
+	// same key, so a reload, a Back button or a retry after a timeout replays
+	// the open session instead of opening a second payment. It travels in the
+	// header and in the signature, never in the body. 1 to 100 visible ASCII
+	// characters; anything else is refused with a *ValidationError before
+	// anything is sent.
 	IdempotencyKey string `json:"-"`
 
 	// Extra carries any additional field the API accepts that this struct does
@@ -165,6 +169,26 @@ var Statuses = []string{
 	StatusAbandoned,
 }
 
+// IsPaid reports whether a status means the payment is complete: true for
+// StatusSucceeded only. StatusRequiresCapture is not paid yet (the funds are
+// held, not captured), and neither is anything this SDK does not recognise.
+func IsPaid(status string) bool {
+	return status == StatusSucceeded
+}
+
+// IsTerminal reports whether a status is final, so polling can stop:
+// succeeded, failed, cancelled, abandoned, refunded and partially_refunded.
+// Everything else is still open and worth polling, including pending,
+// processing, requires_capture, disputed and any status this SDK does not
+// recognise: a value the API adds later must never close a live order.
+func IsTerminal(status string) bool {
+	switch status {
+	case StatusSucceeded, StatusFailed, StatusCancelled, StatusAbandoned, StatusRefunded, StatusPartiallyRefunded:
+		return true
+	}
+	return false
+}
+
 // checkoutSessionEnvelope is the create-session response as it arrives on the
 // wire. Business refusals come back as HTTP 200 with success false, so the
 // branch is on Success, not on the status code. Checkout is present only on
@@ -260,9 +284,12 @@ type ChargePaymentMethodParams struct {
 	OrderReference string `json:"orderReference"`
 	Description    string `json:"description,omitempty"`
 
-	// IdempotencyKey is auto-generated when empty. It travels in the header and
-	// in the signature, never in the body. Retrying with the same key never
-	// charges the card twice, so on a timeout retry with the same key.
+	// IdempotencyKey is required. Derive it from what you are charging for
+	// (the order, the billing period), never per attempt: retrying with the
+	// same key never charges the card twice, so on a timeout retry with the
+	// same key. It travels in the header and in the signature, never in the
+	// body. 1 to 100 visible ASCII characters; anything else is refused with a
+	// *ValidationError before anything is sent.
 	IdempotencyKey string `json:"-"`
 }
 

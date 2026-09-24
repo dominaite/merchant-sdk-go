@@ -606,7 +606,7 @@ func TestChargePaymentMethodResponseMatchesContract(t *testing.T) {
 	}
 	assertSameFields(t, "PaymentMethodCharge", jsonFieldNames(t, PaymentMethodCharge{}), endpoint.Fields)
 
-	params := ChargePaymentMethodParams{Amount: 8440, Currency: "EUR", OrderReference: "order-1042"}
+	params := ChargePaymentMethodParams{Amount: 8440, Currency: "EUR", OrderReference: "order-1042", IdempotencyKey: "renewal-order-1042-8440-EUR"}
 
 	// 201: the envelope is unwrapped and the charge is exactly the fixture's fields.
 	bothWireForms(t, endpoint.SuccessExample, func(t *testing.T, body json.RawMessage) {
@@ -701,7 +701,7 @@ func TestChargeErrorExamplesMatchContract(t *testing.T) {
 	contract := loadContract(t)
 	endpoint := contract.Endpoints.ChargePaymentMethod
 	paymentMethodID := "pm_0123456789abcdef0123456789abcdef"
-	params := ChargePaymentMethodParams{Amount: 8440, Currency: "EUR", OrderReference: "order-1042"}
+	params := ChargePaymentMethodParams{Amount: 8440, Currency: "EUR", OrderReference: "order-1042", IdempotencyKey: "renewal-order-1042-8440-EUR"}
 
 	if len(endpoint.ErrorExamples) == 0 {
 		t.Fatal("the contract lists no charge error examples")

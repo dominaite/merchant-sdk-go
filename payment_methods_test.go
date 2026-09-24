@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -192,24 +191,44 @@ func TestChargePaymentMethodSignsTheChargeVectorByteForByte(t *testing.T) {
 	}
 }
 
-func TestChargePaymentMethodGeneratesAKeyAndSendsDescription(t *testing.T) {
+func TestChargePaymentMethodSendsDescription(t *testing.T) {
 	server, calls := newTestServer(t, reply{Status: http.StatusCreated, Body: testCharge})
 	client := newTestClient(t, server.URL)
 
 	params := testChargeParams()
-	params.IdempotencyKey = ""
 	params.Description = "Monthly plan"
 	if _, err := client.ChargePaymentMethod(context.Background(), testPaymentMethodID, params); err != nil {
 		t.Fatalf("ChargePaymentMethod: %v", err)
 	}
 
 	call := calls()[0]
-	if !regexp.MustCompile(`^[0-9a-f-]{36}$`).MatchString(call.Header.Get("Idempotency-Key")) {
-		t.Fatalf("Idempotency-Key = %q, want a generated UUID", call.Header.Get("Idempotency-Key"))
+	if got := call.Header.Get("Idempotency-Key"); got != params.IdempotencyKey {
+		t.Fatalf("Idempotency-Key = %q, want the caller's %q", got, params.IdempotencyKey)
 	}
 	want := `{"amount":2500,"currency":"EUR","orderReference":"order-1043","description":"Monthly plan"}`
 	if call.Body != want {
 		t.Fatalf("body = %s, want %s", call.Body, want)
+	}
+}
+
+func TestChargePaymentMethodRequiresAnIdempotencyKey(t *testing.T) {
+	for name, key := range map[string]string{"empty": "", "blank": " \t"} {
+		t.Run(name, func(t *testing.T) {
+			server, calls := newTestServer(t, reply{Status: http.StatusCreated, Body: testCharge})
+			client := newTestClient(t, server.URL)
+
+			params := testChargeParams()
+			params.IdempotencyKey = key
+
+			_, err := client.ChargePaymentMethod(context.Background(), testPaymentMethodID, params)
+			var validation *ValidationError
+			if !errors.As(err, &validation) {
+				t.Fatalf("got %v, want *ValidationError", err)
+			}
+			if len(calls()) != 0 {
+				t.Fatalf("sent %d requests without an idempotency key", len(calls()))
+			}
+		})
 	}
 }
 
