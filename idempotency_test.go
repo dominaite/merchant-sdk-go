@@ -52,6 +52,9 @@ func TestOrderIdempotencyKeyRejectsBadParts(t *testing.T) {
 		"digit currency":     func() (string, error) { return OrderIdempotencyKey("checkout", "order-1", 100, "E1R") },
 		"non-ascii currency": func() (string, error) { return OrderIdempotencyKey("checkout", "order-1", 100, "eıu") },
 		"over 100 chars":     func() (string, error) { return OrderIdempotencyKey("checkout", strings.Repeat("x", 90), 100, "EUR") },
+		"space in order":     func() (string, error) { return OrderIdempotencyKey("checkout", "order 1", 100, "EUR") },
+		"non-ascii order":    func() (string, error) { return OrderIdempotencyKey("checkout", "поръчка-1", 100, "EUR") },
+		"space in scope":     func() (string, error) { return OrderIdempotencyKey("check out", "order-1", 100, "EUR") },
 	}
 	for name, build := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -631,8 +631,8 @@ func validateMoneyParams(amount int64, currency, orderReference string) error {
 	return nil
 }
 
-// normalizeIdempotencyKey enforces the key rules: present, not blank, at most
-// 100 characters. There is no fallback. A key the SDK made up would differ on
+// normalizeIdempotencyKey enforces the key rules: 1 to 100 characters, all
+// visible ASCII. There is no fallback. A key the SDK made up would differ on
 // every call, so a reload or a retry would open a second payment for the same
 // order instead of replaying the first.
 func normalizeIdempotencyKey(idempotencyKey string) (string, error) {
@@ -642,12 +642,24 @@ func normalizeIdempotencyKey(idempotencyKey string) (string, error) {
 	return idempotencyKey, nil
 }
 
+// validateIdempotencyKey is the one key rule, shared by every call and by
+// OrderIdempotencyKey. Visible ASCII (0x21 to 0x7E) only: the key is an HTTP
+// header value and part of the signed payload, so a space, a control
+// character or a non-ASCII letter is either refused on the wire or signed as
+// bytes that another stack encodes differently. With ASCII only, bytes and
+// characters are the same count, which also settles the gateway counting
+// UTF-16 units where Go counts runes.
 func validateIdempotencyKey(idempotencyKey string) error {
 	if strings.TrimSpace(idempotencyKey) == "" {
 		return newValidationError("Missing required parameter: idempotencyKey. Derive it from the order with OrderIdempotencyKey, never per call.")
 	}
-	if utf8.RuneCountInString(idempotencyKey) > maxIdempotencyKeyLength {
+	if len(idempotencyKey) > maxIdempotencyKeyLength {
 		return newValidationError("idempotencyKey must be a non-empty string of at most 100 characters")
+	}
+	for i := 0; i < len(idempotencyKey); i++ {
+		if c := idempotencyKey[i]; c < 0x21 || c > 0x7e {
+			return newValidationError("idempotencyKey must be visible ASCII only (no spaces, control characters or non-ASCII letters)")
+		}
 	}
 	return nil
 }

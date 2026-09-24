@@ -485,7 +485,9 @@ key with the new amount would be refused with `IDEMPOTENCY_KEY_REUSED`.
 for one order never share a key. `SaveCard` is part of a session's identity too: if the payer can
 flip it after a session was opened, use a different scope per choice (for example
 `"checkout-save"`). Keys are case-insensitive on the gateway, and the helper uppercases the
-currency.
+currency. A key is 1 to 100 visible ASCII characters (`0x21` to `0x7E`): no spaces, no control
+characters, no non-ASCII letters. The helper checks its output against that rule, so an order id
+with a space or a Cyrillic letter is a `*ValidationError`, not a silently rewritten key.
 
 When the earlier attempt already moved money, ended, or cannot be handed back yet, the replay
 comes back as a `*RefusalError` (`ALREADY_PROCESSED`, `PRIOR_ATTEMPT_FAILED`,

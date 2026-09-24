@@ -28,8 +28,10 @@ import (
 // amountMinor is in MINOR units and must be positive. currency is ISO 4217 and
 // is uppercased here, so "eur" and "EUR" give the same key. Returns a
 // *ValidationError when scope or orderID is blank, the amount is not
-// positive, the currency is not three ASCII letters, or the key would be
-// longer than the 100 characters the API accepts.
+// positive, the currency is not three ASCII letters, or the key breaks the
+// key rules: at most 100 characters, visible ASCII only (0x21 to 0x7E), so
+// an order id with a space or a non-ASCII letter is refused rather than
+// silently rewritten.
 func OrderIdempotencyKey(scope, orderID string, amountMinor int64, currency string) (string, error) {
 	if strings.TrimSpace(scope) == "" {
 		return "", newValidationError("Missing required parameter: scope")

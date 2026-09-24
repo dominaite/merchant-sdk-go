@@ -45,8 +45,9 @@ type CreateCheckoutSessionParams struct {
 	// OrderIdempotencyKey: the same order at the same amount must produce the
 	// same key, so a reload, a Back button or a retry after a timeout replays
 	// the open session instead of opening a second payment. It travels in the
-	// header and in the signature, never in the body. Empty is refused with a
-	// *ValidationError before anything is sent.
+	// header and in the signature, never in the body. 1 to 100 visible ASCII
+	// characters; anything else is refused with a *ValidationError before
+	// anything is sent.
 	IdempotencyKey string `json:"-"`
 
 	// Extra carries any additional field the API accepts that this struct does
@@ -287,7 +288,8 @@ type ChargePaymentMethodParams struct {
 	// (the order, the billing period), never per attempt: retrying with the
 	// same key never charges the card twice, so on a timeout retry with the
 	// same key. It travels in the header and in the signature, never in the
-	// body. Empty is refused with a *ValidationError before anything is sent.
+	// body. 1 to 100 visible ASCII characters; anything else is refused with a
+	// *ValidationError before anything is sent.
 	IdempotencyKey string `json:"-"`
 }
 
