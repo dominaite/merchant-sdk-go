@@ -635,6 +635,51 @@ func TestRetryRetriesA503CarryingPaymentProcessingUnavailable(t *testing.T) {
 	}
 }
 
+// The session route answers PAYMENT_PROCESSING_UNAVAILABLE as an HTTP 200
+// refusal, and the contract marks it retryable: the helper retries it with the
+// same key, like the 503 form.
+func TestRetryRetriesTheRefusalFormOfPaymentProcessingUnavailable(t *testing.T) {
+	unavailable := reply{Body: map[string]any{
+		"success":      false,
+		"errorCode":    ErrorCodePaymentProcessingUnavailable,
+		"errorMessage": "Card payments are not available right now. Retry later with the same idempotency key.",
+	}}
+	server, calls := newTestServer(t, unavailable, unavailable, successReply())
+	client := newTestClient(t, server.URL)
+
+	params := testParams()
+	session, err := client.CreateCheckoutSessionWithRetry(context.Background(), params, RetryOptions{Attempts: 3, BaseDelay: time.Millisecond})
+	if err != nil {
+		t.Fatalf("CreateCheckoutSessionWithRetry: %v", err)
+	}
+	if session.CashierKey != "ck_1" {
+		t.Fatalf("unexpected session: %+v", session)
+	}
+	recorded := calls()
+	if len(recorded) != 3 {
+		t.Fatalf("got %d attempts, want 3", len(recorded))
+	}
+	for i, call := range recorded {
+		if got := call.Header.Get("Idempotency-Key"); got != params.IdempotencyKey {
+			t.Fatalf("attempt %d used key %s, want %s", i, got, params.IdempotencyKey)
+		}
+	}
+}
+
+func TestRetryGivesUpWithThePaymentProcessingUnavailableRefusal(t *testing.T) {
+	server, calls := newTestServer(t, reply{Body: map[string]any{"success": false, "errorCode": ErrorCodePaymentProcessingUnavailable}})
+	client := newTestClient(t, server.URL)
+
+	_, err := client.CreateCheckoutSessionWithRetry(context.Background(), testParams(), RetryOptions{Attempts: 2, BaseDelay: time.Millisecond})
+	var refusal *RefusalError
+	if !errors.As(err, &refusal) || refusal.ErrorCode != ErrorCodePaymentProcessingUnavailable {
+		t.Fatalf("got %v, want the PAYMENT_PROCESSING_UNAVAILABLE refusal", err)
+	}
+	if len(calls()) != 2 {
+		t.Fatalf("got %d attempts, want 2", len(calls()))
+	}
+}
+
 func TestAmountsMustBePositiveMinorUnits(t *testing.T) {
 	server, calls := newTestServer(t, successReply())
 	client := newTestClient(t, server.URL)

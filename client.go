@@ -356,7 +356,8 @@ func (o RetryOptions) withDefaults() (int, time.Duration, error) {
 }
 
 // CreateCheckoutSessionWithRetry creates a session, retrying *TransportError
-// only, with THE SAME idempotency key across every attempt.
+// and PAYMENT_PROCESSING_UNAVAILABLE, with THE SAME idempotency key across
+// every attempt.
 //
 // Reusing the key is what makes the retry safe. A transport failure leaves you
 // not knowing whether the request landed; a key the API has already seen is
@@ -374,8 +375,14 @@ func (o RetryOptions) withDefaults() (int, time.Duration, error) {
 // params.IdempotencyKey is required here as everywhere: the SDK never invents
 // one. Derive it with OrderIdempotencyKey.
 //
-// Refusals and authentication failures are returned immediately. They will not
-// change on a retry.
+// PAYMENT_PROCESSING_UNAVAILABLE is retried in both of its forms: a 503 (a
+// *TransportError like any 5xx) and the HTTP 200 refusal the session route
+// answers with (a *RefusalError). Either way nothing was minted and the
+// gateway asks for a retry with the same key. If it is still unavailable
+// after the last attempt, that refusal is what you get back.
+//
+// Every other refusal, and authentication failures, are returned immediately.
+// They will not change on a retry.
 //
 // Rate limits (*RateLimitError) are returned immediately too. Retrying into a
 // full queue lengthens it; back off for RetryAfterSeconds and reschedule with
@@ -393,8 +400,7 @@ func (c *Client) CreateCheckoutSessionWithRetry(ctx context.Context, params Crea
 			return session, nil
 		}
 
-		var transportErr *TransportError
-		if !errors.As(err, &transportErr) {
+		if !isRetryable(err) {
 			return nil, err
 		}
 		lastErr = err
@@ -410,6 +416,18 @@ func (c *Client) CreateCheckoutSessionWithRetry(ctx context.Context, params Crea
 	}
 
 	return nil, lastErr
+}
+
+// isRetryable names the failures CreateCheckoutSessionWithRetry retries: a
+// transport failure or 5xx, and the refusal saying card processing is
+// unavailable right now. Both leave nothing minted.
+func isRetryable(err error) bool {
+	var transportErr *TransportError
+	if errors.As(err, &transportErr) {
+		return true
+	}
+	var refusal *RefusalError
+	return errors.As(err, &refusal) && refusal.ErrorCode == ErrorCodePaymentProcessingUnavailable
 }
 
 // GetStatus reads the payment status of one of your checkout sessions.

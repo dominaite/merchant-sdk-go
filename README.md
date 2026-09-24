@@ -494,10 +494,11 @@ comes back as a `*RefusalError` (`ALREADY_PROCESSED`, `PRIOR_ATTEMPT_FAILED`,
 `DUPLICATE_REQUEST`). Recover through `RefusalError.TransactionID` and `GetStatus` - see
 [Recovering from a replay refusal](#recovering-from-a-replay-refusal) below.
 
-`CreateCheckoutSessionWithRetry` retries with your key across attempts, retrying only
-`*TransportError` (network failures and 5xx, including `MERCHANT_API_UNAVAILABLE` and a 503
-carrying `PAYMENT_PROCESSING_UNAVAILABLE`). Refusals and authentication failures are not retried - they will
-not change. Rate limits are not retried either: retrying into a full queue only makes it
+`CreateCheckoutSessionWithRetry` retries with your key across attempts. It retries
+`*TransportError` (network failures and 5xx, including `MERCHANT_API_UNAVAILABLE`) and
+`PAYMENT_PROCESSING_UNAVAILABLE` in both of its forms, the 503 and the HTTP 200 refusal; after
+the last attempt you get that refusal back. Other refusals and authentication failures are not
+retried - they will not change. Rate limits are not retried either: retrying into a full queue only makes it
 longer, so a `*RateLimitError` comes straight back for you to reschedule.
 
 ```go
