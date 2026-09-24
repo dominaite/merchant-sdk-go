@@ -39,10 +39,20 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	orderReference := fmt.Sprintf("sdk-go-smoke-%d", time.Now().Unix())
+
+	// Order-derived, never per call: re-running for the same order and amount
+	// replays the open session instead of opening a second payment.
+	key, err := dominaite.OrderIdempotencyKey("checkout", orderReference, 2500, "EUR")
+	if err != nil {
+		return err
+	}
+
 	session, err := client.CreateCheckoutSession(ctx, dominaite.CreateCheckoutSessionParams{
 		Amount:         2500, // minor units: 2500 = 25.00 EUR
 		Currency:       "EUR",
-		OrderReference: fmt.Sprintf("sdk-go-smoke-%d", time.Now().Unix()),
+		OrderReference: orderReference,
+		IdempotencyKey: key,
 		Customer: &dominaite.Customer{
 			FirstName: "Ana",
 			LastName:  "Kirova",

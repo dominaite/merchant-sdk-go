@@ -518,7 +518,6 @@ func TestRetryReusesOneIdempotencyKey(t *testing.T) {
 	client := newTestClient(t, server.URL)
 
 	params := testParams()
-	params.IdempotencyKey = "" // let the SDK mint one, then pin it across attempts
 
 	session, err := client.CreateCheckoutSessionWithRetry(context.Background(), params, RetryOptions{Attempts: 3, BaseDelay: time.Millisecond})
 	if err != nil {
@@ -532,14 +531,27 @@ func TestRetryReusesOneIdempotencyKey(t *testing.T) {
 	if len(recorded) != 3 {
 		t.Fatalf("got %d attempts, want 3", len(recorded))
 	}
-	first := recorded[0].Header.Get("Idempotency-Key")
-	if first == "" {
-		t.Fatal("no idempotency key was sent")
-	}
 	for i, call := range recorded {
-		if got := call.Header.Get("Idempotency-Key"); got != first {
-			t.Fatalf("attempt %d used key %s, want the pinned %s", i, got, first)
+		if got := call.Header.Get("Idempotency-Key"); got != params.IdempotencyKey {
+			t.Fatalf("attempt %d used key %s, want the caller's %s", i, got, params.IdempotencyKey)
 		}
+	}
+}
+
+func TestRetryRefusesAMissingIdempotencyKeyBeforeSending(t *testing.T) {
+	server, calls := newTestServer(t, successReply())
+	client := newTestClient(t, server.URL)
+
+	params := testParams()
+	params.IdempotencyKey = ""
+
+	_, err := client.CreateCheckoutSessionWithRetry(context.Background(), params, RetryOptions{Attempts: 3, BaseDelay: time.Millisecond})
+	var validation *ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("got %v, want *ValidationError", err)
+	}
+	if len(calls()) != 0 {
+		t.Fatalf("sent %d requests without an idempotency key", len(calls()))
 	}
 }
 
@@ -715,20 +727,27 @@ func TestContextCancellationIsATransportError(t *testing.T) {
 	}
 }
 
-func TestGeneratedIdempotencyKeysAreUniqueUUIDs(t *testing.T) {
-	seen := map[string]bool{}
-	for i := 0; i < 100; i++ {
-		key, err := newIdempotencyKey()
-		if err != nil {
-			t.Fatalf("newIdempotencyKey: %v", err)
-		}
-		if !uuidPattern.MatchString(key) {
-			t.Fatalf("not a UUID: %s", key)
-		}
-		if seen[key] {
-			t.Fatalf("duplicate idempotency key: %s", key)
-		}
-		seen[key] = true
+func TestCreateCheckoutSessionRequiresAnIdempotencyKey(t *testing.T) {
+	for name, key := range map[string]string{"empty": "", "blank": "   "} {
+		t.Run(name, func(t *testing.T) {
+			server, calls := newTestServer(t, successReply())
+			client := newTestClient(t, server.URL)
+
+			params := testParams()
+			params.IdempotencyKey = key
+
+			_, err := client.CreateCheckoutSession(context.Background(), params)
+			var validation *ValidationError
+			if !errors.As(err, &validation) {
+				t.Fatalf("got %v, want *ValidationError", err)
+			}
+			if !strings.Contains(validation.Message, "idempotencyKey") {
+				t.Fatalf("message %q does not name the missing key", validation.Message)
+			}
+			if len(calls()) != 0 {
+				t.Fatalf("sent %d requests without an idempotency key", len(calls()))
+			}
+		})
 	}
 }
 

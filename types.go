@@ -41,9 +41,12 @@ type CreateCheckoutSessionParams struct {
 	// themselves never reach you: you get an id, a brand and the last four digits.
 	SaveCard bool `json:"saveCard,omitempty"`
 
-	// IdempotencyKey is auto-generated when empty. It travels in the header and
-	// in the signature, never in the body. Retrying with the same key never
-	// creates a second payment, so on a timeout retry with the same key.
+	// IdempotencyKey is required. Derive it from the order with
+	// OrderIdempotencyKey: the same order at the same amount must produce the
+	// same key, so a reload, a Back button or a retry after a timeout replays
+	// the open session instead of opening a second payment. It travels in the
+	// header and in the signature, never in the body. Empty is refused with a
+	// *ValidationError before anything is sent.
 	IdempotencyKey string `json:"-"`
 
 	// Extra carries any additional field the API accepts that this struct does
@@ -260,9 +263,11 @@ type ChargePaymentMethodParams struct {
 	OrderReference string `json:"orderReference"`
 	Description    string `json:"description,omitempty"`
 
-	// IdempotencyKey is auto-generated when empty. It travels in the header and
-	// in the signature, never in the body. Retrying with the same key never
-	// charges the card twice, so on a timeout retry with the same key.
+	// IdempotencyKey is required. Derive it from what you are charging for
+	// (the order, the billing period), never per attempt: retrying with the
+	// same key never charges the card twice, so on a timeout retry with the
+	// same key. It travels in the header and in the signature, never in the
+	// body. Empty is refused with a *ValidationError before anything is sent.
 	IdempotencyKey string `json:"-"`
 }
 

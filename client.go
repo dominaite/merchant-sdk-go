@@ -12,10 +12,15 @@
 //	if err != nil {
 //		return err
 //	}
+//	key, err := dominaite.OrderIdempotencyKey("checkout", "order-1042", 2500, "EUR")
+//	if err != nil {
+//		return err
+//	}
 //	session, err := client.CreateCheckoutSession(ctx, dominaite.CreateCheckoutSessionParams{
 //		Amount:         2500, // minor units: 25.00 EUR
 //		Currency:       "EUR",
 //		OrderReference: "order-1042",
+//		IdempotencyKey: key, // "checkout-order-1042-2500-EUR"
 //	})
 //
 // Hand session.CashierKey and session.CashierToken to the embed snippet.
@@ -23,8 +28,6 @@ package dominaite
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,6 +68,9 @@ const (
 	// proxy error page or something hostile, and reading it to the end would
 	// let whatever answered decide how much memory this process uses.
 	maxResponseBytes = 10 << 20 // 10MB
+
+	// maxIdempotencyKeyLength is the gateway's limit, in characters.
+	maxIdempotencyKeyLength = 100
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -266,7 +272,8 @@ func (c *Client) Ping(ctx context.Context) (*Ping, error) {
 // CreateCheckoutSession opens a hosted checkout session for one payment.
 //
 // Errors it returns:
-//   - *ValidationError: bad arguments; nothing was sent.
+//   - *ValidationError: bad arguments, including a missing IdempotencyKey;
+//     nothing was sent.
 //   - *AuthError: wrong credentials, bad signature, clock off, IP not allowlisted.
 //     Fix the config, do not retry.
 //   - *RefusalError: the gateway refused the session; inspect ErrorCode.
@@ -357,11 +364,15 @@ func (o RetryOptions) withDefaults() (int, time.Duration, error) {
 // attempt would be exactly the double-charge bug this method exists to
 // prevent, so the key is pinned once before the first attempt.
 //
-// A retry after the first attempt DID land does not give you that session
-// back. The API answers with a replay refusal (*RefusalError, ErrorCode
-// DUPLICATE_REQUEST, ALREADY_PROCESSED, PRIOR_ATTEMPT_FAILED or
-// IDEMPOTENCY_KEY_REUSED) and no cashier fields. Recover through
+// A retry after the first attempt DID land gets that session back while it is
+// still open: same TransactionID, same cashier handles. When the earlier
+// attempt already moved money, ended, or cannot be handed back yet, the API
+// answers with a replay refusal (*RefusalError, ErrorCode ALREADY_PROCESSED,
+// PRIOR_ATTEMPT_FAILED or DUPLICATE_REQUEST). Recover through
 // RefusalError.TransactionID with GetStatus when the API named one.
+//
+// params.IdempotencyKey is required here as everywhere: the SDK never invents
+// one. Derive it with OrderIdempotencyKey.
 //
 // Refusals and authentication failures are returned immediately. They will not
 // change on a retry.
@@ -373,14 +384,6 @@ func (c *Client) CreateCheckoutSessionWithRetry(ctx context.Context, params Crea
 	attempts, baseDelay, err := opts.withDefaults()
 	if err != nil {
 		return nil, err
-	}
-
-	if params.IdempotencyKey == "" {
-		key, err := newIdempotencyKey()
-		if err != nil {
-			return nil, err
-		}
-		params.IdempotencyKey = key
 	}
 
 	var lastErr error
@@ -462,9 +465,10 @@ func (c *Client) GetStatus(ctx context.Context, transactionID string) (*Checkout
 //
 // paymentMethodID is the ID from GetStatus().StoredPaymentMethod of a session
 // you created with SaveCard. The charge is signed like a session and carries
-// an Idempotency-Key (auto-generated unless you set one), so retrying after a
-// timeout WITH THE SAME KEY never charges the card twice: the gateway replays
-// its first answer, HTTP status included.
+// an Idempotency-Key, which you must set (derive it from the billing period,
+// never per attempt), so retrying after a timeout WITH THE SAME KEY never
+// charges the card twice: the gateway replays its first answer, HTTP status
+// included.
 //
 // The HTTP status is the contract on this route. 201 (200 on a replay) returns
 // the charge, Status ChargeStatusSucceeded, ChargeStatusPending or
@@ -627,20 +631,25 @@ func validateMoneyParams(amount int64, currency, orderReference string) error {
 	return nil
 }
 
-// normalizeIdempotencyKey mints a key when none was given and bounds the one
-// that was.
+// normalizeIdempotencyKey enforces the key rules: present, not blank, at most
+// 100 characters. There is no fallback. A key the SDK made up would differ on
+// every call, so a reload or a retry would open a second payment for the same
+// order instead of replaying the first.
 func normalizeIdempotencyKey(idempotencyKey string) (string, error) {
-	if idempotencyKey == "" {
-		key, err := newIdempotencyKey()
-		if err != nil {
-			return "", err
-		}
-		idempotencyKey = key
-	}
-	if utf8.RuneCountInString(idempotencyKey) > 100 {
-		return "", newValidationError("idempotencyKey must be a non-empty string of at most 100 characters")
+	if err := validateIdempotencyKey(idempotencyKey); err != nil {
+		return "", err
 	}
 	return idempotencyKey, nil
+}
+
+func validateIdempotencyKey(idempotencyKey string) error {
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return newValidationError("Missing required parameter: idempotencyKey. Derive it from the order with OrderIdempotencyKey, never per call.")
+	}
+	if utf8.RuneCountInString(idempotencyKey) > maxIdempotencyKeyLength {
+		return newValidationError("idempotencyKey must be a non-empty string of at most 100 characters")
+	}
+	return nil
 }
 
 // normalizePaymentMethodID refuses anything that would not survive as one path
@@ -888,20 +897,6 @@ func parseRetryAfter(header string) (int, bool) {
 		return 0, false
 	}
 	return seconds, true
-}
-
-// newIdempotencyKey mints a random v4 UUID. Keys are per-payment, so a fresh one
-// is generated for every call that does not supply its own.
-func newIdempotencyKey() (string, error) {
-	var buf [16]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return "", newTransportError("Could not generate an idempotency key: "+err.Error(), err)
-	}
-	buf[6] = (buf[6] & 0x0f) | 0x40
-	buf[8] = (buf[8] & 0x3f) | 0x80
-
-	hexed := hex.EncodeToString(buf[:])
-	return hexed[0:8] + "-" + hexed[8:12] + "-" + hexed[12:16] + "-" + hexed[16:20] + "-" + hexed[20:32], nil
 }
 
 func isJSONObject(raw json.RawMessage) bool {
