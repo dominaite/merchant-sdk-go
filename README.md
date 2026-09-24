@@ -126,10 +126,19 @@ func main() {
 		panic(err)
 	}
 
+	// Required. Derived from the order, never random: a reload or a retry for the
+	// same order and amount replays the session already open instead of opening
+	// a second payment. "checkout-order-1042-2500-EUR".
+	key, err := dominaite.OrderIdempotencyKey("checkout", "order-1042", 2500, "EUR")
+	if err != nil {
+		panic(err)
+	}
+
 	session, err := client.CreateCheckoutSession(context.Background(), dominaite.CreateCheckoutSessionParams{
 		Amount:         2500,          // minor units: 2500 = 25.00 EUR
 		Currency:       "EUR",
 		OrderReference: "order-1042",  // your own order id, shows up in your dashboard
+		IdempotencyKey: key,
 		Customer: &dominaite.Customer{
 			// Pass everything you already know - prefilled fields are hidden from the
 			// payer, so the checkout form stays short.
@@ -142,11 +151,16 @@ func main() {
 	})
 	if err != nil {
 		var refusal *dominaite.RefusalError
+		var apiErr *dominaite.APIError
 		var transport *dominaite.TransportError
 		switch {
 		case errors.As(err, &refusal):
 			// Machine-readable: refusal.ErrorCode - codes listed below.
 			fmt.Println("Payment unavailable:", refusal.ErrorCode)
+		case errors.As(err, &apiErr) && apiErr.ErrorCode == dominaite.ErrorCodeStorefrontNotWhitelisted:
+			// HTTP 409: this site's domain is not whitelisted with the payment
+			// provider yet. Not retryable until it is - see Storefront errors.
+			fmt.Println("Checkout is not enabled for this site yet")
 		case errors.As(err, &transport):
 			// Network blip - safe to retry with the same idempotency key.
 			fmt.Println("Payment temporarily unavailable")
@@ -429,28 +443,60 @@ and cancelling the context returns a `*TransportError` wrapping `context.Cancele
 the network. The amount is locked server-side - what you pass here is what gets charged; nothing
 in the browser can change it.
 
+Prices usually live as decimals in your catalog. Convert them with `ToMinorUnits`, which does it
+exactly on the digits, never through a float, by the currency's ISO 4217 exponent:
+
+```go
+amount, err := dominaite.ToMinorUnits("0.30", "EUR") // 30
+amount, err = dominaite.ToMinorUnits("1500", "JPY")   // 1500 (JPY has no minor unit)
+amount, err = dominaite.ToMinorUnits("1.250", "KWD")  // 1250 (three decimals)
+```
+
+It knows EUR, USD, GBP, BGN, RON, CHF, PLN, CZK, HUF, SEK, DKK, NOK (2 decimals), JPY, KRW, ISK
+(0) and BHD, KWD, OMR, JOD, TND (3); `CurrencyExponent` exposes the table. An unknown currency,
+a malformed amount (sign, comma, thousands separator) or more decimals than the currency allows
+(`"0.305"` EUR, `"100.0"` JPY) is a `*ValidationError`, never a silent rounding.
+
 ## Retries and double-charges
 
-Every `CreateCheckoutSession` call carries an idempotency key (auto-generated, or set your own
-in `IdempotencyKey`). Retrying with the same key never opens a second payment - on a timeout,
-retry with the same key rather than generating a new one.
+Every `CreateCheckoutSession` and `ChargePaymentMethod` call needs an `IdempotencyKey`. The SDK
+never makes one up: an empty or blank key is a `*ValidationError` and nothing is sent. Derive
+the key from the order with `OrderIdempotencyKey`:
 
-What a retry does **not** do is hand back the session the first attempt created. If that attempt
-landed and has not expired, the retry comes back as a `*RefusalError` with a replay code (`DUPLICATE_REQUEST`,
-`ALREADY_PROCESSED`, `PRIOR_ATTEMPT_FAILED`, `IDEMPOTENCY_KEY_REUSED`) and no cashier fields.
-Recover through `RefusalError.TransactionID` and `GetStatus` - see
+```go
+key, err := dominaite.OrderIdempotencyKey("checkout", order.ID, amount, "EUR")
+// "checkout-{orderId}-{amountMinor}-{CURRENCY}", e.g. "checkout-order-1042-2500-EUR"
+```
+
+Why order-derived: your payment page will be re-entered (reload, Back button, a second tab, a
+retry after a timeout). The same order at the same amount gives the same key, and the gateway
+answers a replayed key with the session that is already open: same `TransactionID`, same cashier
+handles, render the widget again. A random key per call opens a new session on every view
+instead, and the order ends up pointing at the wrong one. When the amount or currency changes
+(the cart was edited), the helper gives a new key and you get a fresh session; replaying the old
+key with the new amount would be refused with `IDEMPOTENCY_KEY_REUSED`.
+
+`scope` is a fixed label for the call site (`"checkout"`, `"renewal"`) so two kinds of payment
+for one order never share a key. `SaveCard` is part of a session's identity too: if the payer can
+flip it after a session was opened, use a different scope per choice (for example
+`"checkout-save"`). Keys are case-insensitive on the gateway, and the helper uppercases the
+currency.
+
+When the earlier attempt already moved money, ended, or cannot be handed back yet, the replay
+comes back as a `*RefusalError` (`ALREADY_PROCESSED`, `PRIOR_ATTEMPT_FAILED`,
+`DUPLICATE_REQUEST`). Recover through `RefusalError.TransactionID` and `GetStatus` - see
 [Recovering from a replay refusal](#recovering-from-a-replay-refusal) below.
 
-`CreateCheckoutSessionWithRetry` does that for you: it pins one key up front and reuses it
-across attempts, retrying only `*TransportError` (network failures and 5xx, including
-`MERCHANT_API_UNAVAILABLE`). Refusals and authentication failures are not retried - they will
+`CreateCheckoutSessionWithRetry` retries with your key across attempts, retrying only
+`*TransportError` (network failures and 5xx, including `MERCHANT_API_UNAVAILABLE` and a 503
+carrying `PAYMENT_PROCESSING_UNAVAILABLE`). Refusals and authentication failures are not retried - they will
 not change. Rate limits are not retried either: retrying into a full queue only makes it
 longer, so a `*RateLimitError` comes straight back for you to reschedule.
 
 ```go
 session, err := client.CreateCheckoutSessionWithRetry(
 	ctx,
-	dominaite.CreateCheckoutSessionParams{Amount: 2500, Currency: "EUR", OrderReference: "order-1042"},
+	dominaite.CreateCheckoutSessionParams{Amount: 2500, Currency: "EUR", OrderReference: "order-1042", IdempotencyKey: key},
 	dominaite.RetryOptions{Attempts: 3, BaseDelay: 500 * time.Millisecond}, // zero values use these defaults
 )
 ```
@@ -474,11 +520,13 @@ gateway's `paymentMethod` field on the same status is something else: the string
 the payer paid, `card`, `wallet` and so on; it is only reachable through `Raw`.)
 
 ```go
+key, err := dominaite.OrderIdempotencyKey("checkout-save", "sub-8817-first", 2500, "EUR")
 session, err := client.CreateCheckoutSession(ctx, dominaite.CreateCheckoutSessionParams{
 	Amount:         2500,
 	Currency:       "EUR",
 	OrderReference: "sub-8817-first",
 	SaveCard:       true,
+	IdempotencyKey: key,
 })
 // ... the payer completes the hosted checkout ...
 status, err := client.GetStatus(ctx, session.TransactionID)
@@ -583,7 +631,18 @@ after that instant a `pending` session can only become `abandoned`. An unknown t
 returns an `*APIError` with `HTTPStatus` 404.
 
 `succeeded` is the only value that means the payment is complete. Keep polling on `pending`,
-`processing` and `requires_capture` - none of them is terminal.
+`processing` and `requires_capture` - none of them is terminal. `IsPaid(status)` and
+`IsTerminal(status)` encode exactly that: `IsPaid` is true for `succeeded` only; `IsTerminal` is
+true for `succeeded`, `failed`, `cancelled`, `abandoned`, `refunded` and `partially_refunded`,
+and false for everything else, unknown values included.
+
+```go
+if dominaite.IsPaid(status.Status) {
+	markPaid(order)
+} else if !dominaite.IsTerminal(status.Status) {
+	pollAgainLater(order)
+}
+```
 
 `requires_capture` is **not** "unpaid": the payer has already paid and the funds are held
 awaiting capture. Never treat it as an abandoned order.
@@ -618,18 +677,49 @@ For the specific kind, use `errors.As` with the concrete pointer type:
 | `*AuthError` | 401/403. `ErrorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
 | `*RateLimitError` | 429. `RetryAfterSeconds` carries the `Retry-After` header when the API sent one as integer seconds; `HasRetryAfter` tells "wait 0s" apart from "the API did not say". | Back off, then reschedule with the **same** idempotency key. The SDK never retries this for you. |
 | `*TransportError` | Network failure, timeout, or a 5xx without a code the SDK models. Wraps the cause, reachable with `errors.Unwrap`. A 5xx classifies on the status, so an HTML or empty error page from an overloaded edge is still retryable. | Retry with the **same** idempotency key. |
-| `*APIError` | Any other rejecting or unexpected response; `HTTPStatus` carries the code. | Inspect. A 3xx means a proxy or a wrong base URL answered with a redirect - the SDK never follows one. A replayed idempotency key does not land here; it comes back as a `*RefusalError`. |
-| `*ValidationError` | Bad arguments (non-positive amount, missing field, malformed key id). | Fix the call; nothing was sent. |
+| `*APIError` | Any other rejecting or unexpected response; `HTTPStatus` and `ErrorCode` carry the details. | Inspect. A storefront refusal lands here (see [Storefront errors](#storefront-errors)). A 3xx means a proxy or a wrong base URL answered with a redirect - the SDK never follows one. A replayed idempotency key does not land here; it comes back as a `*RefusalError`. |
+| `*ValidationError` | Bad arguments (non-positive amount, missing field or idempotency key, malformed key id). | Fix the call; nothing was sent. |
 | `*WebhookVerificationError` | `VerifyWebhook` rejected an inbound delivery; `Reason` carries which check failed. | Answer 400 with no detail. See [Webhooks](#rejections). |
 
-Refusal codes on `RefusalError.ErrorCode`:
+Refusal codes on `RefusalError.ErrorCode`, exported as `ErrorCode*` constants:
 
-- `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; retry later.
-- `DUPLICATE_REQUEST` - a session for this idempotency key is already open, or expired within
-  the last few minutes. Re-POST the same key shortly, never a fresh one.
-- `ALREADY_PROCESSED` - this idempotency key's payment already completed.
-- `PRIOR_ATTEMPT_FAILED` - a prior attempt with this key failed terminally; use a fresh key.
-- `IDEMPOTENCY_KEY_REUSED` - same key sent with a different body; use a fresh key.
+- `PAYMENT_PROCESSING_UNAVAILABLE` (`ErrorCodePaymentProcessingUnavailable`) - card payments are
+  off right now; retry later with the same key.
+- `DUPLICATE_REQUEST` (`ErrorCodeDuplicateRequest`) - a session for this idempotency key exists
+  but cannot be handed back yet, or expired within the last few minutes. Re-POST the same key
+  shortly, never a fresh one.
+- `ALREADY_PROCESSED` (`ErrorCodeAlreadyProcessed`) - this idempotency key's payment already
+  completed.
+- `PRIOR_ATTEMPT_FAILED` (`ErrorCodePriorAttemptFailed`) - a prior attempt with this key failed
+  terminally; use a fresh key.
+- `IDEMPOTENCY_KEY_REUSED` (`ErrorCodeIdempotencyKeyReused`) - same key sent with a different
+  amount, currency or `SaveCard`; a re-priced order needs a new key.
+- `STOREFRONT_MISMATCH` (`ErrorCodeStorefrontMismatch`) - the key was first used for a different
+  storefront.
+
+### Storefront errors
+
+When a merchant runs more than one website, each session is filed under a storefront (an online
+location). A storefront refusal comes back as an `*APIError` with `HTTPStatus` and `ErrorCode`,
+nothing was minted, and a retry will not change it, so the retry helper returns it at once:
+
+| `ErrorCode` | HTTP | Meaning |
+|---|---|---|
+| `STOREFRONT_NOT_WHITELISTED` (`ErrorCodeStorefrontNotWhitelisted`) | 409 | The site's domain is not whitelisted with the payment provider yet. Contact Dominaite support to finish it; until then this site cannot take payments. |
+| `STOREFRONT_INACTIVE` (`ErrorCodeStorefrontInactive`) | 409 | The storefront was deactivated or deleted. |
+| `STOREFRONT_MISMATCH` (`ErrorCodeStorefrontMismatch`) | 400 | The API key is bound to one storefront and the request named another. (On a replay of an existing key this is a `*RefusalError` instead.) |
+
+```go
+var apiErr *dominaite.APIError
+if errors.As(err, &apiErr) {
+	switch apiErr.ErrorCode {
+	case dominaite.ErrorCodeStorefrontNotWhitelisted, dominaite.ErrorCodeStorefrontInactive:
+		// Show "checkout unavailable" and alert your ops; do not retry in a loop.
+	case dominaite.ErrorCodeStorefrontMismatch:
+		// Configuration bug: this key belongs to another site.
+	}
+}
+```
 
 ### Recovering from a replay refusal
 
