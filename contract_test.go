@@ -35,6 +35,7 @@ type endpointContract struct {
 	StoredPaymentMethodFields []string        `json:"storedPaymentMethodFields"`
 	Example                   json.RawMessage `json:"example"`
 	SavedCardExample          json.RawMessage `json:"savedCardExample"`
+	RetiredCardExample        json.RawMessage `json:"retiredCardExample"`
 	SuccessExample            json.RawMessage `json:"successExample"`
 	DeclinedExample           json.RawMessage `json:"declinedExample"`
 	RefusalExample            json.RawMessage `json:"refusalExample"`
@@ -46,6 +47,8 @@ type responseContract struct {
 	Version                             string   `json:"version"`
 	StatusVocabulary                    []string `json:"statusVocabulary"`
 	StoredPaymentMethodStatusVocabulary []string `json:"storedPaymentMethodStatusVocabulary"`
+	RetiredReasonVocabulary             []string `json:"storedPaymentMethodRetiredReasonVocabulary"`
+	StorefrontErrorCodes                []string `json:"storefrontErrorCodes"`
 	ChargeStatusVocabulary              []string `json:"chargeStatusVocabulary"`
 	DeclineClassVocabulary              []string `json:"declineClassVocabulary"`
 	SessionRefusalErrorCodes            []string `json:"sessionRefusalErrorCodes"`
@@ -475,6 +478,53 @@ func TestStoredPaymentMethodMatchesContract(t *testing.T) {
 	if !reflect.DeepEqual(StoredPaymentMethodStatuses, contract.StoredPaymentMethodStatusVocabulary) {
 		t.Errorf("StoredPaymentMethodStatuses = %v, contract says %v", StoredPaymentMethodStatuses, contract.StoredPaymentMethodStatusVocabulary)
 	}
+	if !reflect.DeepEqual(StoredPaymentMethodRetiredReasons, contract.RetiredReasonVocabulary) {
+		t.Errorf("StoredPaymentMethodRetiredReasons = %v, contract says %v", StoredPaymentMethodRetiredReasons, contract.RetiredReasonVocabulary)
+	}
+}
+
+// The storefront codes, in the gateway's order, and none of them a session
+// refusal: they arrive as HTTP errors, not the success=false shape.
+func TestStorefrontErrorCodesMatchContract(t *testing.T) {
+	contract := loadContract(t)
+
+	if !reflect.DeepEqual(StorefrontErrorCodes, contract.StorefrontErrorCodes) {
+		t.Errorf("StorefrontErrorCodes = %v, contract says %v", StorefrontErrorCodes, contract.StorefrontErrorCodes)
+	}
+	for _, code := range StorefrontErrorCodes {
+		if contains(contract.SessionRefusalErrorCodes, code) {
+			t.Errorf("%s is listed as a session refusal", code)
+		}
+	}
+}
+
+// A card the platform retired reads with its status and reason, as spelled and
+// on the wire.
+func TestGetStatusRetiredCardExampleMatchesContract(t *testing.T) {
+	contract := loadContract(t)
+	endpoint := contract.Endpoints.GetStatus
+	if len(endpoint.RetiredCardExample) == 0 {
+		t.Fatal("the contract has no getStatus.retiredCardExample")
+	}
+
+	bothWireForms(t, endpoint.RetiredCardExample, func(t *testing.T, body json.RawMessage) {
+		server, _ := newTestServer(t, reply{Body: string(body)})
+		status, err := newTestClient(t, server.URL).GetStatus(context.Background(), "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0")
+		if err != nil {
+			t.Fatalf("the contract's retired-card example must parse: %v", err)
+		}
+		if status.Status != StatusRefunded {
+			t.Errorf("Status = %q, want refunded", status.Status)
+		}
+		want := StoredPaymentMethod{
+			ID: "pm_0123456789abcdef0123456789abcdef", Brand: "visa", Last4: "4242",
+			ExpiryMonth: 12, ExpiryYear: 2029, Status: StoredPaymentMethodStatusRetired,
+			RetiredReason: RetiredReasonSourceSaleReversed,
+		}
+		if status.StoredPaymentMethod == nil || *status.StoredPaymentMethod != want {
+			t.Errorf("StoredPaymentMethod = %+v, want %+v", status.StoredPaymentMethod, want)
+		}
+	})
 }
 
 func TestChargeVocabulariesMatchContract(t *testing.T) {

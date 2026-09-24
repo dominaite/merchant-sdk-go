@@ -174,8 +174,8 @@ type RateLimitError struct {
 // of them: a decline is a charge result with Status ChargeStatusFailed, not an
 // error.
 const (
-	// ChargeErrorPaymentMethodNotActive (409): the method is revoked or
-	// expired; ask the customer for another card via a hosted session with
+	// ChargeErrorPaymentMethodNotActive (409): the method is revoked, expired
+	// or retired; ask the customer for another card via a hosted session with
 	// SaveCard.
 	ChargeErrorPaymentMethodNotActive = "PAYMENT_METHOD_NOT_ACTIVE"
 	// ChargeErrorDuplicateRequest (409): a request with this key is still in
@@ -200,6 +200,18 @@ const (
 	// with the SAME key.
 	ChargeErrorProcessingUnavailable = "PAYMENT_PROCESSING_UNAVAILABLE"
 )
+
+// StorefrontErrorCodes are the storefront codes a session create can be
+// refused with, in the gateway's own order: ErrorCodeStorefrontMismatch
+// (HTTP 400), ErrorCodeStorefrontInactive (409) and
+// ErrorCodeStorefrontNotWhitelisted (409). None is retryable. They arrive as an
+// *APIError, not as the HTTP 200 refusal shape, so they are not session
+// refusal codes.
+var StorefrontErrorCodes = []string{
+	ErrorCodeStorefrontMismatch,
+	ErrorCodeStorefrontInactive,
+	ErrorCodeStorefrontNotWhitelisted,
+}
 
 // ChargeErrorCodes is the complete v1 vocabulary of ChargeError.ErrorCode.
 // Unknown codes still arrive as a *ChargeError; branch on the ones you know.

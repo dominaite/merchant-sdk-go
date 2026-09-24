@@ -14,8 +14,17 @@ import (
 // never the fixture.
 const wireContractPath = "testdata/merchant-api-wire-contract.json"
 
+type wireErrorCode struct {
+	Code       string `json:"code"`
+	HTTPStatus int    `json:"httpStatus"`
+	Retry      *bool  `json:"retry"`
+}
+
 type wireContract struct {
-	Statuses            []string `json:"statuses"`
+	Statuses   []string `json:"statuses"`
+	ErrorCodes struct {
+		Storefront []wireErrorCode `json:"storefront"`
+	} `json:"errorCodes"`
 	WebhookEventCatalog []string `json:"webhookEventCatalog"`
 	SDKs                []string `json:"sdks"`
 }
@@ -53,6 +62,30 @@ func TestWireContractWebhookEventCatalog(t *testing.T) {
 	}
 	if !reflect.DeepEqual(events, wire.WebhookEventCatalog) {
 		t.Fatalf("Event* constants drifted from the gateway contract\n  sdk:     %v\n  gateway: %v", events, wire.WebhookEventCatalog)
+	}
+}
+
+func TestWireContractStorefrontErrorCodes(t *testing.T) {
+	wire := loadWireContract(t)
+	var codes []string
+	for _, entry := range wire.ErrorCodes.Storefront {
+		codes = append(codes, entry.Code)
+		if entry.Retry == nil || *entry.Retry {
+			t.Errorf("%s: retry = %v, want false", entry.Code, entry.Retry)
+		}
+	}
+	if !reflect.DeepEqual(StorefrontErrorCodes, codes) {
+		t.Fatalf("StorefrontErrorCodes drifted from the gateway contract\n  sdk:     %v\n  gateway: %v", StorefrontErrorCodes, codes)
+	}
+	want := map[string]int{
+		ErrorCodeStorefrontMismatch:       400,
+		ErrorCodeStorefrontInactive:       409,
+		ErrorCodeStorefrontNotWhitelisted: 409,
+	}
+	for _, entry := range wire.ErrorCodes.Storefront {
+		if want[entry.Code] != entry.HTTPStatus {
+			t.Errorf("%s: HTTP %d, want %d", entry.Code, entry.HTTPStatus, want[entry.Code])
+		}
 	}
 }
 

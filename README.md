@@ -561,7 +561,7 @@ if errors.As(err, &chargeErr) {
 	case dominaite.ChargeErrorDuplicateRequest, dominaite.ChargeErrorChargesDisabled, dominaite.ChargeErrorProcessingUnavailable:
 		// Nothing was charged; retry later with the SAME idempotency key.
 	case dominaite.ChargeErrorPaymentMethodNotActive:
-		// Revoked or expired: bring the customer back for a hosted session with SaveCard.
+		// Revoked, expired or retired: bring the customer back for a hosted session with SaveCard.
 	case dominaite.ChargeErrorFailed:
 		// 502, nothing was charged. chargeErr.Charge is set when a row exists.
 	case dominaite.ChargeErrorIdempotencyKeyReused:
