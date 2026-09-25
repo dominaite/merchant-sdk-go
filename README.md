@@ -333,6 +333,7 @@ branch on one.
 ```go
 event.ID                     // delivery id, and YOUR DEDUPE KEY
 event.Type                   // one of the Event* constants
+event.APIVersion             // dated payload version, e.g. "2026-09-25"; empty from older gateways
 event.CreatedAt              // ISO 8601 UTC instant of the transition, not of delivery
 event.Data.TransactionID
 event.Data.Status            // wire status, one of the Status* constants
@@ -343,8 +344,14 @@ event.Data.SurchargeAmount   // *int64, nil when no surcharge is known
 event.Data.Currency
 event.Data.OriginalTransactionID  // parent, on refunds and reversals
 event.Data.IdempotencyKey    // your own mint key, when the gateway knows it
+event.Data.Sequence          // per-object order on agreement.* and charge.*; 0 when absent
+event.Data.Raw               // the data object, for fields not modelled above
 event.Raw                    // the verified bytes, for anything not modelled above
 ```
+
+`APIVersion` is the dated version of the payload shape. Fields are only ever added under a
+version, never renamed or removed, so ignore fields you do not recognise. A retry resends the
+bytes of the first attempt, so a redelivered event keeps its `APIVersion`.
 
 `Amount` and `GrossAmount` are not the same number when a surcharge applies: `Amount` is what
 you are paid, `GrossAmount` is what moved on the card. Credit orders from `Amount`.
@@ -373,6 +380,56 @@ drive in-flight UX off them.
 
 Treat a `Type` you do not recognise as a no-op and still answer `2xx`. The catalog can grow,
 and a 400 on an unknown type will trip the circuit breaker on your endpoint.
+
+### Ordering agreement and charge events
+
+`agreement.*` and `charge.*` deliveries carry `data.sequence`, parsed into `event.Data.Sequence`.
+
+> Deliveries can arrive out of order. Keep the highest sequence you have processed per object
+> and discard any event whose sequence is not higher; when you need current state, read the
+> object by id. createdAt can repeat across events, so order by sequence, not createdAt. A
+> sequence of 0 only comes from events recorded before the counter existed; treat it as older
+> than any positive number.
+
+The object is:
+
+| Event | Object key |
+|---|---|
+| `agreement.*` | the agreement, `data.id` |
+| `charge.*` placed by the platform for an agreement | the agreement period, `data.agreementId` + `data.periodNumber` |
+| `charge.*` for a one-off charge you initiated | `data.chargeId` |
+
+This SDK does not model the agreement and charge payloads yet, so read the key from
+`event.Data.Raw`:
+
+```go
+var obj struct {
+	ID           string `json:"id"`
+	AgreementID  string `json:"agreementId"`
+	PeriodNumber int    `json:"periodNumber"`
+	ChargeID     string `json:"chargeId"`
+}
+if err := json.Unmarshal(event.Data.Raw, &obj); err != nil {
+	return err
+}
+
+var key string
+switch {
+case strings.HasPrefix(event.Type, "agreement."):
+	key = obj.ID
+case obj.AgreementID != "":
+	key = fmt.Sprintf("%s/%d", obj.AgreementID, obj.PeriodNumber)
+default:
+	key = obj.ChargeID
+}
+
+// In the same transaction as the work itself:
+if event.Data.Sequence <= lastSequence(key) {
+	return nil // stale or repeated, answer 2xx and drop it
+}
+```
+
+`payment.*` events carry no sequence; `event.Data.Sequence` is 0 for them.
 
 ### Delivery semantics
 
