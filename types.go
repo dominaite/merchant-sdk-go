@@ -420,8 +420,16 @@ type WebhookEvent struct {
 	// Type is one of the Event* constants. Treat an unrecognised type as a
 	// no-op rather than an error; the catalog can grow.
 	Type string `json:"type"`
+	// APIVersion is the dated version of the payload shape the event was
+	// rendered in, e.g. "2026-09-25". Fields are only ever added under a
+	// version, never renamed or removed. A retry resends the bytes of the first
+	// attempt, so a redelivered event keeps its original APIVersion. Empty on
+	// deliveries from a gateway that predates the field.
+	APIVersion string `json:"apiVersion"`
 	// CreatedAt is the ISO 8601 UTC instant of the transition, not of delivery.
-	// On a retry it still carries the original transition time.
+	// On a retry it still carries the original transition time. It can repeat
+	// across events, so never order agreement.* or charge.* events by it; use
+	// Data.Sequence.
 	CreatedAt string      `json:"createdAt"`
 	Data      WebhookData `json:"data"`
 
@@ -462,6 +470,18 @@ type WebhookData struct {
 	// cheapest way to match a delivery back to your order without a lookup.
 	// Empty when unknown, which today includes every refund.
 	IdempotencyKey string `json:"idempotencyKey"`
+
+	// Sequence orders agreement.* and charge.* events for one object: it counts
+	// the announced changes of that object, only ever rises, and a redelivery
+	// carries the same number. The object is the agreement (data.id) for
+	// agreement.*, the agreement period (agreementId plus periodNumber) for a
+	// charge the platform placed for an agreement, and the chargeId for a
+	// one-off charge; read those keys from Raw. Keep the highest Sequence you
+	// have processed per object and discard any event whose Sequence is not
+	// higher. Zero when absent (payment.* events do not carry it) and on
+	// events recorded before the counter existed; treat zero as older than any
+	// positive number.
+	Sequence int64 `json:"sequence"`
 
 	// Raw is the unparsed data object, for fields not modelled above.
 	Raw json.RawMessage `json:"-"`
