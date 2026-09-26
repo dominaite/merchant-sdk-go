@@ -9,6 +9,18 @@
 - `WebhookData.Sequence`: the per-object `data.sequence` on `agreement.*` and `charge.*` events.
   Keep the highest one processed per object and drop anything not higher; order by it, never by
   `createdAt`. Zero when absent. The README documents the object keys.
+- Refunds: `CreateRefund` and `GetRefund` on `/merchant-api/payments/{transactionId}/refunds`.
+  `CreateRefundParams.IdempotencyKey` is required and signed; a nil `Amount` sends no amount and
+  refunds everything still refundable. `Refund`, the `RefundStatus*` constants with
+  `RefundStatuses` and `IsRefundTerminal`, the `RefundFailure*` failure codes, and
+  `*RefundError` with the `RefundError*` codes and `Retryable` (`DUPLICATE_REQUEST`,
+  `REFUND_NOT_FOUND`). A failed refund is a `Refund` with `Status` `failed`, not an error, and
+  fires no webhook.
+- `WebhookData.StoredPaymentMethod`: the card a `SaveCard` session stored, on `payment.*`
+  events, as the same `StoredPaymentMethod` type the status read returns. `nil` when no card was
+  saved, and also on some sales where the card was stored after the approval was announced;
+  `GetStatus` stays the source of truth.
+- Contract fixture refreshed with the refund endpoints and vocabularies.
 
 ## 0.3.0
 
