@@ -551,6 +551,22 @@ type WebhookData struct {
 	// Empty when unknown, which today includes every refund.
 	IdempotencyKey string `json:"idempotencyKey"`
 
+	// StoredPaymentMethod is the card a SaveCard session stored, on payment.*
+	// events: the same object as CheckoutStatus.StoredPaymentMethod, so its ID
+	// is what ChargePaymentMethod takes. Set on payment.succeeded (and
+	// payment.requires_capture for an authorization) when the card was stored
+	// together with the approval.
+	//
+	// nil (null or absent on the wire) when no card was saved, and on every
+	// other event. It can ALSO be nil when a card was saved: on server-to-server
+	// sales that succeeded synchronously and on sales settled by the
+	// background sweep, the card is stored after the approval was announced.
+	// GetStatus is the source of truth: on a SaveCard session whose event has
+	// StoredPaymentMethod nil, read the status to pick the card up.
+	//
+	// charge.* events carry storedPaymentMethodId instead (read it from Raw).
+	StoredPaymentMethod *StoredPaymentMethod `json:"storedPaymentMethod,omitempty"`
+
 	// Sequence orders agreement.* and charge.* events for one object: it counts
 	// the announced changes of that object, only ever rises, and a redelivery
 	// carries the same number. The object is the agreement (data.id) for
