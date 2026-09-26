@@ -55,6 +55,11 @@ const (
 	// PaymentMethodsPath + "/{paymentMethodId}" revokes it.
 	PaymentMethodsPath = "/merchant-api/payment-methods"
 
+	// PaymentsPath is the canonical path of payments. POST PaymentsPath +
+	// "/{transactionId}/refunds" refunds one; GET PaymentsPath +
+	// "/{transactionId}/refunds/{refundId}" reads a refund back.
+	PaymentsPath = "/merchant-api/payments"
+
 	// PingPath is the credentials-and-clock smoke test. It creates nothing.
 	PingPath = "/merchant-api/ping"
 
@@ -80,6 +85,9 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 // percent-encoding. The id goes into the signed canonical path verbatim, so
 // anything else would sign one path and request another.
 var paymentMethodIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`)
+
+// A refund id (re_...) is opaque too, and goes into the signed path the same way.
+var refundIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`)
 
 // Client is a server-side client for the Dominaite merchant API. It is safe for
 // concurrent use.
@@ -458,9 +466,9 @@ func isRetryable(err error) bool {
 // loop: the endpoint is rate limited per key (60/min per key, 120/min per IP),
 // and going over returns a *RateLimitError.
 func (c *Client) GetStatus(ctx context.Context, transactionID string) (*CheckoutStatus, error) {
-	normalized := strings.ToLower(strings.TrimSpace(transactionID))
-	if !uuidPattern.MatchString(normalized) {
-		return nil, newValidationError("transactionId must be the UUID returned by CreateCheckoutSession")
+	normalized, err := normalizeTransactionID(transactionID)
+	if err != nil {
+		return nil, err
 	}
 
 	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
@@ -579,6 +587,82 @@ func (c *Client) RevokePaymentMethod(ctx context.Context, paymentMethodID string
 	return reply.rejection()
 }
 
+// CreateRefund refunds a payment, in full or in part. transactionID is the id
+// CreateCheckoutSession or ChargePaymentMethod returned; only card-not-present
+// payments of your own account can be refunded.
+//
+// params.IdempotencyKey is required and signed, exactly as on a charge. Derive
+// it from your refund (the return or credit-note id): replaying the same key
+// answers the same refund and never refunds twice, so on a timeout retry with
+// the same key. The same key with a different amount, reason or payment is
+// refused with IDEMPOTENCY_KEY_REUSED.
+//
+// Leave params.Amount nil to refund everything still refundable. Partial
+// refunds add up: the amount may not exceed what is left after earlier refunds
+// and refunds still in progress.
+//
+// The gateway answers HTTP 202: the refund is queued, not done. Read it back
+// with GetRefund, or wait for the payment.refunded webhook, which fires once the
+// money has moved. A failed refund sends no webhook, so poll GetRefund if you
+// need to know about failures. A replay of the same key returns the refund as
+// it stands now, so it doubles as a status read.
+//
+// Errors it returns:
+//   - *ValidationError: bad arguments, including a missing IdempotencyKey;
+//     nothing was sent.
+//   - *RefundError: 400, 404, 409 or 422 with a RefundError* code; branch on
+//     ErrorCode, retry with the same key only when Retryable.
+//   - *AuthError: wrong credentials, bad signature, clock off, IP not allowlisted.
+//   - *APIError: an unexpected response; inspect HTTPStatus.
+//   - *RateLimitError: HTTP 429; back off and reschedule with the same key.
+//   - *TransportError: network failure or 5xx. Nothing was queued on a 5xx;
+//     retry WITH the same key.
+func (c *Client) CreateRefund(ctx context.Context, transactionID string, params CreateRefundParams) (*Refund, error) {
+	id, err := normalizeTransactionID(transactionID)
+	if err != nil {
+		return nil, err
+	}
+	idempotencyKey, body, err := prepareRefundRequest(params)
+	if err != nil {
+		return nil, err
+	}
+
+	reply, err := c.send(ctx, http.MethodPost, PaymentsPath+"/"+id+"/refunds", body, idempotencyKey)
+	if err != nil {
+		return nil, err
+	}
+	return reply.refund()
+}
+
+// GetRefund reads one refund of a payment: its Status, the Amount refunded
+// once it succeeded, and FailureCode once it failed. Stop polling when
+// IsRefundTerminal(refund.Status) is true.
+//
+// Right after CreateRefund the refund may not be picked up yet: GetRefund then
+// returns a *RefundError with ErrorCode REFUND_NOT_FOUND and Retryable set.
+// Poll again for up to 60 seconds; after that the id is unknown.
+//
+// Errors it returns: as CreateRefund, without the idempotency key rules. The
+// read is signed with an empty idempotency key and an empty body.
+func (c *Client) GetRefund(ctx context.Context, transactionID, refundID string) (*Refund, error) {
+	id, err := normalizeTransactionID(transactionID)
+	if err != nil {
+		return nil, err
+	}
+	normalizedRefundID := strings.TrimSpace(refundID)
+	if !refundIDPattern.MatchString(normalizedRefundID) {
+		return nil, newValidationError("refundId must be the RefundID returned by CreateRefund")
+	}
+
+	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
+	// Idempotency-Key header.
+	reply, err := c.send(ctx, http.MethodGet, PaymentsPath+"/"+id+"/refunds/"+normalizedRefundID, "", "")
+	if err != nil {
+		return nil, err
+	}
+	return reply.refund()
+}
+
 // prepareSessionRequest validates the params and returns the idempotency key and
 // the exact body bytes that will be both signed and sent.
 func prepareSessionRequest(params CreateCheckoutSessionParams) (string, string, error) {
@@ -608,6 +692,27 @@ func prepareSessionRequest(params CreateCheckoutSessionParams) (string, string, 
 func prepareChargeRequest(params ChargePaymentMethodParams) (string, string, error) {
 	if err := validateMoneyParams(params.Amount, params.Currency, params.OrderReference); err != nil {
 		return "", "", err
+	}
+
+	idempotencyKey, err := normalizeIdempotencyKey(params.IdempotencyKey)
+	if err != nil {
+		return "", "", err
+	}
+
+	body, err := marshalNoEscape(params)
+	if err != nil {
+		return "", "", newValidationError("Request parameters are not JSON-encodable: " + err.Error())
+	}
+
+	return idempotencyKey, string(body), nil
+}
+
+// prepareRefundRequest validates the params and returns the idempotency key
+// and the exact body bytes that will be both signed and sent. A nil Amount is
+// left out of the body entirely: that is what asks for a full refund.
+func prepareRefundRequest(params CreateRefundParams) (string, string, error) {
+	if params.Amount != nil && *params.Amount <= 0 {
+		return "", "", newValidationError("amount must be a positive integer in MINOR units, or nil to refund everything still refundable")
 	}
 
 	idempotencyKey, err := normalizeIdempotencyKey(params.IdempotencyKey)
@@ -692,6 +797,16 @@ func normalizePaymentMethodID(paymentMethodID string) (string, error) {
 	return normalized, nil
 }
 
+// normalizeTransactionID lowercases a transaction id and refuses anything that
+// is not a UUID. The gateway signs the lowercase hyphenated form.
+func normalizeTransactionID(transactionID string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(transactionID))
+	if !uuidPattern.MatchString(normalized) {
+		return "", newValidationError("transactionId must be the UUID returned by CreateCheckoutSession")
+	}
+	return normalized, nil
+}
+
 // request signs and sends one call, and applies the generic failure rules:
 // 5xx is a *TransportError, 4xx an *APIError. body and idempotencyKey are both
 // empty for GET and DELETE.
@@ -752,6 +867,26 @@ func (r *response) charge() *PaymentMethodCharge {
 		return nil
 	}
 	return charge
+}
+
+// refund reads a refund route's reply: the refund on a 2xx, a *RefundError for
+// a coded 4xx, and the generic errors for the rest (5xx is a *TransportError).
+func (r *response) refund() (*Refund, error) {
+	if r.status >= 400 {
+		code := r.err.code()
+		if code != "" && r.status < 500 {
+			return nil, newRefundError(r.status, code, firstNonEmpty(r.err.message(), "The refund was refused."), r.envelope)
+		}
+		return nil, r.rejection()
+	}
+	if !r.parsed || !isJSONObject(r.data) {
+		return nil, newAPIError(r.status, "The API answered the refund without a refund body")
+	}
+	refund := &Refund{Raw: r.data}
+	if json.Unmarshal(r.data, refund) != nil || refund.RefundID == "" {
+		return nil, newAPIError(r.status, "The API returned an unexpected refund object")
+	}
+	return refund, nil
 }
 
 // rejection is the generic reading of a failed reply: 5xx is the API being

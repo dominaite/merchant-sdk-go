@@ -11,9 +11,9 @@ import (
 //	if errors.Is(err, dominaite.ErrDominaite) { ... }
 //
 // For the specific kind, use errors.As with *RefusalError, *ChargeError,
-// *RevokeError, *AuthError, *RateLimitError, *APIError, *TransportError or
-// *ValidationError, or errors.As with the Error interface to catch any of them
-// while keeping the message.
+// *RevokeError, *RefundError, *AuthError, *RateLimitError, *APIError,
+// *TransportError or *ValidationError, or errors.As with the Error interface to
+// catch any of them while keeping the message.
 var ErrDominaite = errors.New("dominaite")
 
 // Error is implemented by every error this SDK returns. It is sealed: only the
@@ -287,6 +287,104 @@ type RevokeError struct {
 	Raw json.RawMessage
 }
 
+// Refund error codes, in the gateway's own order: the codes CreateRefund and
+// GetRefund return as a *RefundError.
+const (
+	// RefundErrorPaymentNotFound (404): no card-not-present payment with this
+	// id under your account. Not retryable.
+	RefundErrorPaymentNotFound = "PAYMENT_NOT_FOUND"
+	// RefundErrorRefundNotFound (404, GetRefund only): no refund with this id
+	// on this payment. Right after CreateRefund the refund may not be picked
+	// up yet: poll again for up to 60 seconds, after that the id is unknown.
+	RefundErrorRefundNotFound = "REFUND_NOT_FOUND"
+	// RefundErrorPaymentNotRefundable (422): the payment is not paid, already
+	// fully refunded, or everything left on it is already being refunded.
+	// Nothing was queued and the key is not burnt.
+	RefundErrorPaymentNotRefundable = "PAYMENT_NOT_REFUNDABLE"
+	// RefundErrorAmountExceeded (422): the amount is more than what is left to
+	// refund, counting refunds still in progress; the message names the
+	// amount left. Nothing was queued and the key is not burnt.
+	RefundErrorAmountExceeded = "REFUND_AMOUNT_EXCEEDED"
+	// RefundErrorIdempotencyKeyReused (422): the key was first used for a
+	// different amount, reason or payment. Use a fresh key for a genuinely
+	// new refund.
+	RefundErrorIdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED"
+	// RefundErrorDuplicateRequest (409): a request with this key is being
+	// processed right now. Retry with the SAME key after a second, for up to
+	// 120 seconds.
+	RefundErrorDuplicateRequest = "DUPLICATE_REQUEST"
+	// RefundErrorIdempotencyKeyRequired (400): the Idempotency-Key header was
+	// missing or too long. The SDK refuses such a key before sending, so this
+	// only arrives if something between you and the API dropped the header.
+	RefundErrorIdempotencyKeyRequired = "IDEMPOTENCY_KEY_REQUIRED"
+)
+
+// RefundErrorCodes is the complete v1 vocabulary of RefundError.ErrorCode.
+// Unknown codes still arrive as a *RefundError; branch on the ones you know.
+var RefundErrorCodes = []string{
+	RefundErrorPaymentNotFound,
+	RefundErrorRefundNotFound,
+	RefundErrorPaymentNotRefundable,
+	RefundErrorAmountExceeded,
+	RefundErrorIdempotencyKeyReused,
+	RefundErrorDuplicateRequest,
+	RefundErrorIdempotencyKeyRequired,
+}
+
+// Refund failure codes, in the gateway's own order: the values of
+// Refund.FailureCode on a failed refund. They are not errors: CreateRefund and
+// GetRefund return the refund with Status RefundStatusFailed. Treat a value you
+// do not recognise as RefundFailureFailed.
+const (
+	// RefundFailureAmountExceeded: by the time the refund ran, less was left
+	// to refund than it asked for.
+	RefundFailureAmountExceeded = "REFUND_AMOUNT_EXCEEDED"
+	// RefundFailurePaymentNotRefundable: by the time the refund ran, the
+	// payment could no longer be refunded.
+	RefundFailurePaymentNotRefundable = "PAYMENT_NOT_REFUNDABLE"
+	// RefundFailureFailed: the refund could not be completed. Retry with a new
+	// idempotency key if it is still wanted.
+	RefundFailureFailed = "REFUND_FAILED"
+)
+
+// RefundFailureCodes is the complete v1 vocabulary of Refund.FailureCode.
+var RefundFailureCodes = []string{
+	RefundFailureAmountExceeded,
+	RefundFailurePaymentNotRefundable,
+	RefundFailureFailed,
+}
+
+// RefundError means a refund route answered with one of the RefundError*
+// codes instead of a refund: HTTP 400, 404, 409 or 422 (see each constant for
+// what to do). HTTPStatus carries the status, Message the gateway's own text.
+//
+// Retryable is true for the two codes the gateway asks you to retry with the
+// SAME idempotency key: DUPLICATE_REQUEST (for up to 120 seconds) and, on
+// GetRefund, REFUND_NOT_FOUND (for up to 60 seconds after CreateRefund).
+// Everything else will not change on a retry.
+//
+//	refund, err := client.CreateRefund(ctx, transactionID, params)
+//	var refundErr *dominaite.RefundError
+//	if errors.As(err, &refundErr) && refundErr.ErrorCode == dominaite.RefundErrorAmountExceeded {
+//		// less is left to refund than you asked for; nothing was queued
+//	}
+//
+// A failed refund is not a *RefundError: it comes back as a Refund with Status
+// RefundStatusFailed and a FailureCode. Authentication (401/403, *AuthError),
+// rate limiting (429, *RateLimitError) and network failures or any 5xx
+// (*TransportError: nothing was queued, retry with the SAME key) keep their
+// generic errors on these routes.
+type RefundError struct {
+	baseError
+	HTTPStatus int
+	ErrorCode  string
+	// Retryable reports whether retrying with the same idempotency key can
+	// succeed: DUPLICATE_REQUEST and REFUND_NOT_FOUND.
+	Retryable bool
+	// Raw is the whole envelope the gateway sent, for fields not modelled above.
+	Raw json.RawMessage
+}
+
 // APIError means the API answered, but with an unexpected or rejecting response.
 // HTTPStatus carries the code. A 404 from GetStatus means an unknown
 // transaction id; a 404 from ChargePaymentMethod or RevokePaymentMethod an id
@@ -341,6 +439,11 @@ func newChargeError(status int, code, message string, charge *PaymentMethodCharg
 		chargeErr.TransactionID = charge.TransactionID
 	}
 	return chargeErr
+}
+
+func newRefundError(status int, code, message string, raw json.RawMessage) *RefundError {
+	retryable := code == RefundErrorDuplicateRequest || code == RefundErrorRefundNotFound
+	return &RefundError{baseError: baseError{Message: message}, HTTPStatus: status, ErrorCode: code, Retryable: retryable, Raw: raw}
 }
 
 func newRevokeError(status int, code, message string, raw json.RawMessage) *RevokeError {
