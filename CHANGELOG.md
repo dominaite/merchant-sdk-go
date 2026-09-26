@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1 (unreleased)
+
+### Added
+
+- `WebhookEvent.APIVersion`: the dated payload version (`apiVersion`, currently `2026-09-25`)
+  every webhook envelope now carries. Empty on deliveries from a gateway that predates it.
+- `WebhookData.Sequence`: the per-object `data.sequence` on `agreement.*` and `charge.*` events.
+  Keep the highest one processed per object and drop anything not higher; order by it, never by
+  `createdAt`. Zero when absent. The README documents the object keys.
+
 ## 0.3.0
 
 ### Breaking
