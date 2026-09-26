@@ -30,6 +30,12 @@ The module path does not change; this ships as tag `v0.3.0`.
 - `CreateCheckoutSessionWithRetry` also retries the HTTP 200 refusal form of
   `PAYMENT_PROCESSING_UNAVAILABLE`, with the same key.
 - Stored payment methods: `SaveCard`, `ChargePaymentMethod`, `RevokePaymentMethod`.
+- Saved cards can be `retired`: the platform stopped the card on its own and it never becomes
+  active again. `StoredPaymentMethodStatusRetired`, `StoredPaymentMethod.RetiredReason` (empty
+  unless retired) and the `RetiredReason*` constants with `StoredPaymentMethodRetiredReasons`
+  (`hard_decline`, `chargeback`, `source_sale_reversed`).
+- `StorefrontErrorCodes` lists the three storefront codes in the contract's order.
+- Contract fixtures refreshed from the gateway (contract version 2026-09-16).
 
 ### Fixed
 

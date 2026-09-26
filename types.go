@@ -236,11 +236,14 @@ type CheckoutStatus struct {
 //
 // Only active methods can be charged. StoredPaymentMethodStatusRevoked is what
 // Client.RevokePaymentMethod leaves behind; StoredPaymentMethodStatusExpired
-// means the card's expiry date has passed.
+// means the card's expiry date has passed; StoredPaymentMethodStatusRetired
+// means the platform stopped the card on its own (RetiredReason says why) and
+// it never becomes active again, so ask the customer to save a card again.
 const (
 	StoredPaymentMethodStatusActive  = "active"
 	StoredPaymentMethodStatusRevoked = "revoked"
 	StoredPaymentMethodStatusExpired = "expired"
+	StoredPaymentMethodStatusRetired = "retired"
 )
 
 // StoredPaymentMethodStatuses is the complete v1 stored-payment-method status
@@ -249,6 +252,27 @@ var StoredPaymentMethodStatuses = []string{
 	StoredPaymentMethodStatusActive,
 	StoredPaymentMethodStatusRevoked,
 	StoredPaymentMethodStatusExpired,
+	StoredPaymentMethodStatusRetired,
+}
+
+// Why the platform retired a stored payment method, in the gateway's own order.
+//
+// RetiredReasonHardDecline: a charge on the card was declined as final.
+// RetiredReasonChargeback: a charge on it was disputed.
+// RetiredReasonSourceSaleReversed: the payment that saved it was fully
+// refunded or disputed.
+const (
+	RetiredReasonHardDecline        = "hard_decline"
+	RetiredReasonChargeback         = "chargeback"
+	RetiredReasonSourceSaleReversed = "source_sale_reversed"
+)
+
+// StoredPaymentMethodRetiredReasons is the complete v1 retired-reason
+// vocabulary. Treat a value outside this list as retired for an unknown reason.
+var StoredPaymentMethodRetiredReasons = []string{
+	RetiredReasonHardDecline,
+	RetiredReasonChargeback,
+	RetiredReasonSourceSaleReversed,
 }
 
 // StoredPaymentMethod is a card kept on file. Never the card number, never the
@@ -270,6 +294,10 @@ type StoredPaymentMethod struct {
 	// Status is one of the StoredPaymentMethodStatus* constants. Treat any value
 	// you do not recognise as not chargeable.
 	Status string `json:"status"`
+	// RetiredReason is one of the RetiredReason* constants when Status is
+	// StoredPaymentMethodStatusRetired, and kept if the card is revoked
+	// afterwards. Empty on every other card (the gateway sends null or omits it).
+	RetiredReason string `json:"retiredReason,omitempty"`
 }
 
 // ChargePaymentMethodParams are the parameters for Client.ChargePaymentMethod.
