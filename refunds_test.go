@@ -124,7 +124,7 @@ func TestCreateRefundFullSendsNoAmountKey(t *testing.T) {
 	assertSignedWith(t, call, http.MethodPost, PaymentsPath+"/"+testRefundTransactionID+"/refunds", testRefundKey)
 
 	if refund.Amount != nil {
-		t.Errorf("Amount = %d, want nil for a full refund before success", *refund.Amount)
+		t.Errorf("Amount = %d, want nil for a pending full refund", *refund.Amount)
 	}
 }
 

@@ -450,9 +450,10 @@ type Refund struct {
 	TransactionID string `json:"transactionId"`
 	// Status is one of the RefundStatus* constants.
 	Status string `json:"status"`
-	// Amount is in MINOR units. Before success it is the amount requested, nil
-	// for a full refund; on succeeded it is the amount actually refunded; on
-	// failed it is always nil.
+	// Amount is in MINOR units. On pending it is the amount requested, nil for a
+	// full refund; on processing it is the amount being refunded, nil until a
+	// full refund has been sized; on succeeded it is the amount actually
+	// refunded; on failed it is always nil.
 	Amount *int64 `json:"amount,omitempty"`
 	// Currency is the ISO 4217 code of the payment. A refund is always in the
 	// payment's currency.

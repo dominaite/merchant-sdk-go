@@ -727,8 +727,9 @@ if dominaite.IsRefundTerminal(refund.Status) {
 
 `Status` is `pending` (queued), `processing` (with the payment provider), `succeeded` or `failed`
 (exported as the `RefundStatus*` constants); the last two are final. `Amount` is the amount
-requested before success (`nil` for a full refund), the amount actually refunded on `succeeded`,
-and always `nil` on `failed`. `FailureCode` is set on `failed` only: `REFUND_AMOUNT_EXCEEDED`,
+requested on `pending` (`nil` for a full refund), the amount being refunded on `processing` (`nil`
+until a full refund has been sized), the amount actually refunded on `succeeded`, and always `nil`
+on `failed`. `FailureCode` is set on `failed` only: `REFUND_AMOUNT_EXCEEDED`,
 `PAYMENT_NOT_REFUNDABLE` or `REFUND_FAILED` (the `RefundFailure*` constants); treat a value you
 do not recognise as `REFUND_FAILED`. A failed refund is final for its key: a new attempt needs a
 new key. `CompletedAt` is set once the refund is final.
