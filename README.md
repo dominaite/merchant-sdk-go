@@ -344,6 +344,7 @@ event.Data.SurchargeAmount   // *int64, nil when no surcharge is known
 event.Data.Currency
 event.Data.OriginalTransactionID  // parent, on refunds and reversals
 event.Data.IdempotencyKey    // your own mint key, when the gateway knows it
+event.Data.StoredPaymentMethod  // *StoredPaymentMethod on payment.* events; nil when none
 event.Data.Sequence          // per-object order on agreement.* and charge.*; 0 when absent
 event.Data.Raw               // the data object, for fields not modelled above
 event.Raw                    // the verified bytes, for anything not modelled above
@@ -361,6 +362,16 @@ surcharge of zero".
 
 `IdempotencyKey` is the cheapest way to match a delivery back to your own order without a
 lookup. It is empty when the gateway does not know it, which today includes every refund.
+
+`StoredPaymentMethod` is the card a `SaveCard` session stored: the same `StoredPaymentMethod`
+type `GetStatus` returns, so its `ID` is what `ChargePaymentMethod` takes. It is set on
+`payment.succeeded` (and `payment.requires_capture` for an authorization) when the card was
+stored together with the approval, and `nil` when no card was saved and on every other event.
+It can also be `nil` when a card **was** saved: on server-to-server sales that succeeded
+synchronously and on sales settled by the background sweep, the card is stored after the
+approval was announced. `GetStatus` is the source of truth, so on a `SaveCard` session whose
+event has `StoredPaymentMethod == nil`, read the status to pick the card up. `charge.*` events
+carry `storedPaymentMethodId` instead (read it from `Data.Raw`).
 
 ### Event catalog
 
@@ -673,6 +684,72 @@ Revoking signs an empty key and an empty body, like `GetStatus`. A revoke that f
 `StoredPaymentMethod` with `Status` `revoked`, and a charge against it is refused with
 `PAYMENT_METHOD_NOT_ACTIVE`. An id that is not yours is an `*APIError` with `HTTPStatus` 404.
 
+## Refunds
+
+`CreateRefund` refunds a card-not-present payment of your own account, in full or in part.
+`transactionID` is the id `CreateCheckoutSession` or `ChargePaymentMethod` returned. The amount
+is in minor units of the payment's currency, so convert with `ToMinorUnits` (HUF has 0
+decimals):
+
+```go
+amount, err := dominaite.ToMinorUnits("1500", "HUF") // 1500
+refund, err := client.CreateRefund(ctx, transactionID, dominaite.CreateRefundParams{
+	Amount:         &amount, // nil refunds everything still refundable
+	Reason:         "Returned item",
+	IdempotencyKey: "refund-credit-note-77", // derive it from YOUR refund, never per attempt
+})
+// refund.RefundID == "re_...", refund.Status == dominaite.RefundStatusPending
+```
+
+`IdempotencyKey` is required and signed, exactly as on a charge. Derive it from your return or
+credit-note id: the same key always answers the same refund and never refunds twice, so on a
+timeout retry with the **same** key. The same key with a different amount, reason or payment is
+refused with `IDEMPOTENCY_KEY_REUSED`.
+
+Leave `Amount` nil for a full refund: the SDK then sends no `amount` at all. It is a pointer so
+that a partial refund that computed to zero is refused as a `*ValidationError` instead of turning
+into a full refund. Partial refunds add up, and the amount may not exceed what is left after
+earlier refunds and refunds still in progress. `Reason` is optional, at most 500 characters.
+
+The gateway answers 202: the refund is **queued, not done**. Read it back with `GetRefund`, or
+wait for `payment.refunded`, which fires once the money has moved. On that event
+`Data.TransactionID` is the refund's own transaction, `Data.Amount` is the amount of that refund
+and `Data.OriginalTransactionID` is the payment you refunded. A failed refund fires **no**
+webhook, so poll `GetRefund` if you need to know about failures.
+
+```go
+refund, err := client.GetRefund(ctx, transactionID, refundID) // the RefundID you stored
+if dominaite.IsRefundTerminal(refund.Status) {
+	// succeeded: *refund.Amount is what was refunded
+	// failed: refund.FailureCode says why
+}
+```
+
+`Status` is `pending` (queued), `processing` (with the payment provider), `succeeded` or `failed`
+(exported as the `RefundStatus*` constants); the last two are final. `Amount` is the amount
+requested on `pending` (`nil` for a full refund), the amount being refunded on `processing` (`nil`
+until a full refund has been sized), the amount actually refunded on `succeeded`, and always `nil`
+on `failed`. `FailureCode` is set on `failed` only: `REFUND_AMOUNT_EXCEEDED`,
+`PAYMENT_NOT_REFUNDABLE` or `REFUND_FAILED` (the `RefundFailure*` constants); treat a value you
+do not recognise as `REFUND_FAILED`. A failed refund is final for its key: a new attempt needs a
+new key. `CompletedAt` is set once the refund is final.
+
+Coded refusals are a `*RefundError` with `HTTPStatus`, `ErrorCode` (the `RefundError*`
+constants) and `Retryable`:
+
+| Code | HTTP | Meaning | Retryable |
+|---|---|---|---|
+| `PAYMENT_NOT_FOUND` | 404 | No card-not-present payment with this id under your account. | no |
+| `REFUND_NOT_FOUND` | 404 | `GetRefund` only: not picked up yet right after the 202. Poll for up to 60 seconds. | yes |
+| `PAYMENT_NOT_REFUNDABLE` | 422 | Not paid, already fully refunded, or everything left is already being refunded. Nothing queued, key not burnt. | no |
+| `REFUND_AMOUNT_EXCEEDED` | 422 | More than what is left to refund; the message names the amount left. Nothing queued, key not burnt. | no |
+| `IDEMPOTENCY_KEY_REUSED` | 422 | The key was first used for a different amount, reason or payment. | no |
+| `DUPLICATE_REQUEST` | 409 | A request with this key is in flight. Retry with the **same** key after a second, for up to 120 seconds. | yes |
+| `IDEMPOTENCY_KEY_REQUIRED` | 400 | The Idempotency-Key header was missing or too long. | no |
+
+A 5xx means nothing was queued: it is a `*TransportError`, retry with the **same** key.
+Authentication (401/403) and rate limiting (429) keep their generic errors.
+
 ## Status polling (fallback, and the reconciliation sweep)
 
 **Prefer webhooks for learning that a payment resolved.** Polling is the right tool for three
@@ -739,6 +816,7 @@ For the specific kind, use `errors.As` with the concrete pointer type:
 | `*RefusalError` | The API answered with `success: false`. `ErrorCode` carries the reason. | Branch on `ErrorCode`. Do not blind-retry. |
 | `*ChargeError` | `ChargePaymentMethod` answered 409, 422, 502 or 503 with a code; `ErrorCode`, `HTTPStatus`, and `Charge`/`TransactionID` when the gateway attached the charge row. | Branch on `ErrorCode`; see [Stored payment methods](#stored-payment-methods-recurring). `CHARGE_OUTCOME_UNKNOWN`: poll `TransactionID`, never retry under a new key. |
 | `*RevokeError` | `RevokePaymentMethod` answered 502 (`UPSTREAM_CONTRACT_ERROR`) or 503 (`MERCHANT_API_UNAVAILABLE`). Nothing changed. | 503: retry later. 502: contact support with the id. |
+| `*RefundError` | `CreateRefund` or `GetRefund` answered 400, 404, 409 or 422 with a code; `ErrorCode`, `HTTPStatus` and `Retryable`. A failed refund is not an error: it is a `Refund` with `Status` `failed`. | Branch on `ErrorCode`; see [Refunds](#refunds). Retry with the same key only when `Retryable`. |
 | `*AuthError` | 401/403. `ErrorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
 | `*RateLimitError` | 429. `RetryAfterSeconds` carries the `Retry-After` header when the API sent one as integer seconds; `HasRetryAfter` tells "wait 0s" apart from "the API did not say". | Back off, then reschedule with the **same** idempotency key. The SDK never retries this for you. |
 | `*TransportError` | Network failure, timeout, or a 5xx without a code the SDK models. Wraps the cause, reachable with `errors.Unwrap`. A 5xx classifies on the status, so an HTML or empty error page from an overloaded edge is still retryable. | Retry with the **same** idempotency key. |

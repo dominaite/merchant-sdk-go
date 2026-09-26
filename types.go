@@ -391,6 +391,87 @@ type PaymentMethodCharge struct {
 	Raw json.RawMessage `json:"-"`
 }
 
+// CreateRefundParams are the parameters for Client.CreateRefund. Only
+// IdempotencyKey is required.
+type CreateRefundParams struct {
+	// Amount is what to refund, in MINOR units of the payment's currency (2500
+	// is 25.00 EUR, 1500 is 1,500 HUF), at least 1. nil refunds everything still
+	// refundable: no amount is sent at all. A pointer, so a partial refund that
+	// computed to zero is refused as a *ValidationError instead of quietly
+	// turning into a full refund. ToMinorUnits converts a decimal amount.
+	Amount *int64 `json:"amount,omitempty"`
+	// Reason is free text stored with the refund, at most 500 characters.
+	Reason string `json:"reason,omitempty"`
+
+	// IdempotencyKey is required. Derive it from YOUR refund (the return or
+	// credit-note id), never per attempt: the same key always names the same
+	// refund and never refunds twice, so on a timeout retry with the same key.
+	// It travels in the header and in the signature, never in the body. 1 to
+	// 100 visible ASCII characters; anything else is refused with a
+	// *ValidationError before anything is sent.
+	IdempotencyKey string `json:"-"`
+}
+
+// Refund status values, in the gateway's own order. RefundStatusPending: queued.
+// RefundStatusProcessing: with the payment provider now. RefundStatusSucceeded:
+// the money was returned to the payer. RefundStatusFailed: the refund did not
+// happen, read FailureCode; final for that idempotency key, so a new attempt
+// needs a new key.
+const (
+	RefundStatusPending    = "pending"
+	RefundStatusProcessing = "processing"
+	RefundStatusSucceeded  = "succeeded"
+	RefundStatusFailed     = "failed"
+)
+
+// RefundStatuses is the complete v1 refund status vocabulary. Treat a value
+// outside this list as still open.
+var RefundStatuses = []string{
+	RefundStatusPending,
+	RefundStatusProcessing,
+	RefundStatusSucceeded,
+	RefundStatusFailed,
+}
+
+// IsRefundTerminal reports whether a refund status is final, so polling can
+// stop: succeeded and failed. pending, processing and any status this SDK does
+// not recognise are still open.
+func IsRefundTerminal(status string) bool {
+	return status == RefundStatusSucceeded || status == RefundStatusFailed
+}
+
+// Refund is what CreateRefund and GetRefund return. The gateway omits null
+// fields on the wire; they read as nil or empty here.
+type Refund struct {
+	// RefundID is re_ followed by 32 hex characters. The same idempotency key
+	// on the same payment always names the same refund.
+	RefundID string `json:"refundId"`
+	// TransactionID is the payment being refunded.
+	TransactionID string `json:"transactionId"`
+	// Status is one of the RefundStatus* constants.
+	Status string `json:"status"`
+	// Amount is in MINOR units. On pending it is the amount requested, nil for a
+	// full refund; on processing it is the amount being refunded, nil until a
+	// full refund has been sized; on succeeded it is the amount actually
+	// refunded; on failed it is always nil.
+	Amount *int64 `json:"amount,omitempty"`
+	// Currency is the ISO 4217 code of the payment. A refund is always in the
+	// payment's currency.
+	Currency string `json:"currency"`
+	// FailureCode is set on a failed refund only: one of the RefundFailure*
+	// constants. Treat a value you do not recognise as RefundFailureFailed.
+	FailureCode string `json:"failureCode,omitempty"`
+	// FailureMessage is a fixed English explanation of FailureCode, for your
+	// logs. Empty unless the refund failed.
+	FailureMessage string `json:"failureMessage,omitempty"`
+	// CompletedAt is the ISO 8601 UTC instant the refund reached succeeded or
+	// failed. Empty before that.
+	CompletedAt string `json:"completedAt,omitempty"`
+
+	// Raw is the unparsed refund object, for fields this struct does not model yet.
+	Raw json.RawMessage `json:"-"`
+}
+
 // Webhook event types. This is the complete v1 catalog - endpoint registration
 // rejects anything outside it, and the match is case-sensitive.
 //
@@ -470,6 +551,22 @@ type WebhookData struct {
 	// cheapest way to match a delivery back to your order without a lookup.
 	// Empty when unknown, which today includes every refund.
 	IdempotencyKey string `json:"idempotencyKey"`
+
+	// StoredPaymentMethod is the card a SaveCard session stored, on payment.*
+	// events: the same object as CheckoutStatus.StoredPaymentMethod, so its ID
+	// is what ChargePaymentMethod takes. Set on payment.succeeded (and
+	// payment.requires_capture for an authorization) when the card was stored
+	// together with the approval.
+	//
+	// nil (null or absent on the wire) when no card was saved, and on every
+	// other event. It can ALSO be nil when a card was saved: on server-to-server
+	// sales that succeeded synchronously and on sales settled by the
+	// background sweep, the card is stored after the approval was announced.
+	// GetStatus is the source of truth: on a SaveCard session whose event has
+	// StoredPaymentMethod nil, read the status to pick the card up.
+	//
+	// charge.* events carry storedPaymentMethodId instead (read it from Raw).
+	StoredPaymentMethod *StoredPaymentMethod `json:"storedPaymentMethod,omitempty"`
 
 	// Sequence orders agreement.* and charge.* events for one object: it counts
 	// the announced changes of that object, only ever rises, and a redelivery
