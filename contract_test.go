@@ -39,6 +39,10 @@ type endpointContract struct {
 	SuccessExample            json.RawMessage `json:"successExample"`
 	DeclinedExample           json.RawMessage `json:"declinedExample"`
 	RefusalExample            json.RawMessage `json:"refusalExample"`
+	PartialExample            json.RawMessage `json:"partialExample"`
+	FullExample               json.RawMessage `json:"fullExample"`
+	SucceededExample          json.RawMessage `json:"succeededExample"`
+	FailedExample             json.RawMessage `json:"failedExample"`
 	ErrorExamples             []errorExample  `json:"errorExamples"`
 	NotFoundExample           *errorExample   `json:"notFoundExample"`
 }
@@ -55,12 +59,17 @@ type responseContract struct {
 	ValidationErrorCodes                []string `json:"validationErrorCodes"`
 	ChargeErrorCodes                    []string `json:"chargeErrorCodes"`
 	RevokeErrorCodes                    []string `json:"revokeErrorCodes"`
+	RefundStatusVocabulary              []string `json:"refundStatusVocabulary"`
+	RefundErrorCodes                    []string `json:"refundErrorCodes"`
+	RefundFailureCodes                  []string `json:"refundFailureCodes"`
 	Endpoints                           struct {
 		Ping                  endpointContract `json:"ping"`
 		CreateCheckoutSession endpointContract `json:"createCheckoutSession"`
 		GetStatus             endpointContract `json:"getStatus"`
 		ChargePaymentMethod   endpointContract `json:"chargePaymentMethod"`
 		RevokePaymentMethod   endpointContract `json:"revokePaymentMethod"`
+		CreateRefund          endpointContract `json:"createRefund"`
+		GetRefund             endpointContract `json:"getRefund"`
 	} `json:"endpoints"`
 }
 
@@ -942,6 +951,232 @@ func TestRevokePaymentMethodResponseMatchesContract(t *testing.T) {
 	if !errors.As(err, &transportErr) {
 		t.Errorf("codeless 503: got %T (%v), want *TransportError", err, err)
 	}
+}
+
+func TestRefundVocabulariesMatchContract(t *testing.T) {
+	contract := loadContract(t)
+
+	if !reflect.DeepEqual(RefundStatuses, contract.RefundStatusVocabulary) {
+		t.Errorf("RefundStatuses = %v, contract says %v", RefundStatuses, contract.RefundStatusVocabulary)
+	}
+	if !reflect.DeepEqual(RefundErrorCodes, contract.RefundErrorCodes) {
+		t.Errorf("RefundErrorCodes = %v, contract says %v", RefundErrorCodes, contract.RefundErrorCodes)
+	}
+	if !reflect.DeepEqual(RefundFailureCodes, contract.RefundFailureCodes) {
+		t.Errorf("RefundFailureCodes = %v, contract says %v", RefundFailureCodes, contract.RefundFailureCodes)
+	}
+	if contains(RefundErrorCodes, RefundFailureFailed) {
+		t.Error("REFUND_FAILED is a failureCode on a failed refund, never an HTTP error code")
+	}
+}
+
+// assertRefundExample checks that a refund example carries only declared
+// fields (nulls are absent, so a subset) and returns its data object.
+func assertRefundExample(t *testing.T, name string, endpoint endpointContract, example json.RawMessage) map[string]any {
+	t.Helper()
+	if len(example) == 0 {
+		t.Fatalf("the contract has no %s", name)
+	}
+	data := chargeData(t, example)
+	for _, key := range jsonKeys(t, data) {
+		if !contains(endpoint.Fields, key) {
+			t.Errorf("%s carries %q, which is not a declared field", name, key)
+		}
+	}
+	var object map[string]any
+	if err := json.Unmarshal(data, &object); err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	return object
+}
+
+// assertRefundMatchesExample compares a parsed refund with the example's data,
+// reading a missing field as nil or empty.
+func assertRefundMatchesExample(t *testing.T, refund *Refund, want map[string]any) {
+	t.Helper()
+	text := func(key string) string {
+		value, _ := want[key].(string)
+		return value
+	}
+	if refund.RefundID != text("refundId") || refund.TransactionID != text("transactionId") || refund.Status != text("status") || refund.Currency != text("currency") {
+		t.Errorf("refund = %+v, want %v", refund, want)
+	}
+	if refund.FailureCode != text("failureCode") || refund.FailureMessage != text("failureMessage") || refund.CompletedAt != text("completedAt") {
+		t.Errorf("refund = %+v, want %v", refund, want)
+	}
+	amount, hasAmount := want["amount"].(float64)
+	switch {
+	case hasAmount && (refund.Amount == nil || *refund.Amount != int64(amount)):
+		t.Errorf("Amount = %v, want %v", refund.Amount, amount)
+	case !hasAmount && refund.Amount != nil:
+		t.Errorf("Amount = %d, want nil", *refund.Amount)
+	}
+	if !contains(RefundStatuses, refund.Status) {
+		t.Errorf("status %q is not in RefundStatuses", refund.Status)
+	}
+	if refund.FailureCode != "" && !contains(RefundFailureCodes, refund.FailureCode) {
+		t.Errorf("failureCode %q is not in RefundFailureCodes", refund.FailureCode)
+	}
+	if len(refund.RefundID) != 35 || refund.RefundID[:3] != "re_" {
+		t.Errorf("RefundID = %q, want re_ plus 32 hex characters", refund.RefundID)
+	}
+}
+
+// assertRefundErrorExamples runs every error example through a refund call and
+// expects a *RefundError with the example's status, code and message.
+func assertRefundErrorExamples(t *testing.T, name string, endpoint endpointContract, call func(client *Client) (*Refund, error)) {
+	t.Helper()
+	if len(endpoint.ErrorExamples) == 0 {
+		t.Fatalf("the contract lists no %s error examples", name)
+	}
+	for _, example := range endpoint.ErrorExamples {
+		example := example
+		if !contains(RefundErrorCodes, example.Code) {
+			t.Errorf("%s error example code %q is not in RefundErrorCodes", name, example.Code)
+		}
+		var body struct {
+			Error struct {
+				Code       string `json:"code"`
+				Message    string `json:"message"`
+				StatusCode int    `json:"statusCode"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(example.Body, &body); err != nil {
+			t.Fatalf("%s error example %s: %v", name, example.Code, err)
+		}
+		if body.Error.Code != example.Code || body.Error.StatusCode != example.HTTPStatus {
+			t.Errorf("%s error example %s: body says %s %d", name, example.Code, body.Error.Code, body.Error.StatusCode)
+		}
+		t.Run(name+"/"+example.Code, func(t *testing.T) {
+			server, _ := newTestServer(t, reply{Status: example.HTTPStatus, Body: string(example.Body)})
+			refund, err := call(newTestClient(t, server.URL))
+			if refund != nil {
+				t.Fatalf("an error example must not produce a refund: %+v", refund)
+			}
+			var refundErr *RefundError
+			if !errors.As(err, &refundErr) {
+				t.Fatalf("got %T (%v), want *RefundError", err, err)
+			}
+			if refundErr.HTTPStatus != example.HTTPStatus || refundErr.ErrorCode != example.Code || refundErr.Error() != body.Error.Message {
+				t.Errorf("got %d %s %q, want %d %s %q", refundErr.HTTPStatus, refundErr.ErrorCode, refundErr.Error(), example.HTTPStatus, example.Code, body.Error.Message)
+			}
+			if string(refundErr.Raw) != string(example.Body) {
+				t.Error("Raw must be the whole envelope")
+			}
+		})
+	}
+}
+
+func TestCreateRefundResponseMatchesContract(t *testing.T) {
+	contract := loadContract(t)
+	endpoint := contract.Endpoints.CreateRefund
+	transactionID := "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+
+	if want := PaymentsPath + "/{transactionId}/refunds"; endpoint.Path != want {
+		t.Errorf("contract path = %q, PaymentsPath says %q", endpoint.Path, want)
+	}
+	if endpoint.Method != "POST" || endpoint.HTTPStatus != 202 {
+		t.Errorf("contract says %s %d, want POST 202", endpoint.Method, endpoint.HTTPStatus)
+	}
+	assertSameFields(t, "Refund", jsonFieldNames(t, Refund{}), endpoint.Fields)
+
+	for name, example := range map[string]json.RawMessage{"partialExample": endpoint.PartialExample, "fullExample": endpoint.FullExample} {
+		want := assertRefundExample(t, "createRefund."+name, endpoint, example)
+		_, partial := want["amount"]
+		params := CreateRefundParams{IdempotencyKey: "refund-credit-note-77"}
+		if partial {
+			amount := int64(want["amount"].(float64))
+			params.Amount = &amount
+		}
+		t.Run(name, func(t *testing.T) {
+			bothWireForms(t, example, func(t *testing.T, body json.RawMessage) {
+				server, calls := newTestServer(t, reply{Status: endpoint.HTTPStatus, Body: string(body)})
+				refund, err := newTestClient(t, server.URL).CreateRefund(context.Background(), transactionID, params)
+				if err != nil {
+					t.Fatalf("the contract's %s must parse: %v", name, err)
+				}
+				assertRefundMatchesExample(t, refund, want)
+				call := calls()[0]
+				if want := strings.Replace(endpoint.Path, "{transactionId}", transactionID, 1); call.Path != want || call.Method != endpoint.Method {
+					t.Errorf("sent %s %s, want %s %s", call.Method, call.Path, endpoint.Method, want)
+				}
+				if call.Header.Get("Idempotency-Key") == "" {
+					t.Error("a refund must carry an Idempotency-Key")
+				}
+				if strings.Contains(call.Body, "amount") != partial {
+					t.Errorf("body = %s; amount must be sent for a partial refund only", call.Body)
+				}
+			})
+		})
+	}
+
+	// Every refund status deserializes the same way.
+	var partial map[string]any
+	if err := json.Unmarshal(endpoint.PartialExample, &partial); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range RefundStatuses {
+		partial["data"].(map[string]any)["status"] = value
+		body, _ := json.Marshal(partial)
+		server, _ := newTestServer(t, reply{Status: 202, Body: string(body)})
+		refund, err := newTestClient(t, server.URL).CreateRefund(context.Background(), transactionID, CreateRefundParams{IdempotencyKey: "refund-credit-note-77"})
+		if err != nil || refund.Status != value {
+			t.Errorf("status %q: got %+v, %v", value, refund, err)
+		}
+	}
+
+	assertRefundErrorExamples(t, "createRefund", endpoint, func(client *Client) (*Refund, error) {
+		return client.CreateRefund(context.Background(), transactionID, CreateRefundParams{IdempotencyKey: "refund-credit-note-77"})
+	})
+}
+
+func TestGetRefundResponseMatchesContract(t *testing.T) {
+	contract := loadContract(t)
+	endpoint := contract.Endpoints.GetRefund
+	transactionID := "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+
+	if want := PaymentsPath + "/{transactionId}/refunds/{refundId}"; endpoint.Path != want {
+		t.Errorf("contract path = %q, PaymentsPath says %q", endpoint.Path, want)
+	}
+	if endpoint.Method != "GET" || endpoint.HTTPStatus != 200 {
+		t.Errorf("contract says %s %d, want GET 200", endpoint.Method, endpoint.HTTPStatus)
+	}
+	assertSameFields(t, "Refund", jsonFieldNames(t, Refund{}), endpoint.Fields)
+
+	for name, example := range map[string]json.RawMessage{"succeededExample": endpoint.SucceededExample, "failedExample": endpoint.FailedExample} {
+		want := assertRefundExample(t, "getRefund."+name, endpoint, example)
+		refundID := want["refundId"].(string)
+		t.Run(name, func(t *testing.T) {
+			bothWireForms(t, example, func(t *testing.T, body json.RawMessage) {
+				server, calls := newTestServer(t, reply{Status: endpoint.HTTPStatus, Body: string(body)})
+				refund, err := newTestClient(t, server.URL).GetRefund(context.Background(), transactionID, refundID)
+				if err != nil {
+					t.Fatalf("the contract's %s must parse: %v", name, err)
+				}
+				assertRefundMatchesExample(t, refund, want)
+				if !IsRefundTerminal(refund.Status) {
+					t.Errorf("%s status %q must be terminal", name, refund.Status)
+				}
+				call := calls()[0]
+				wantPath := strings.Replace(strings.Replace(endpoint.Path, "{transactionId}", transactionID, 1), "{refundId}", refundID, 1)
+				if call.Path != wantPath || call.Method != endpoint.Method {
+					t.Errorf("sent %s %s, want %s %s", call.Method, call.Path, endpoint.Method, wantPath)
+				}
+				if _, present := call.Header["Idempotency-Key"]; present || call.Body != "" {
+					t.Error("a refund read signs an empty key and an empty body, and sends neither")
+				}
+			})
+		})
+	}
+
+	// A failed refund never carries an amount.
+	if failed := assertRefundExample(t, "getRefund.failedExample", endpoint, endpoint.FailedExample); failed["amount"] != nil || failed["failureCode"] != RefundFailureFailed {
+		t.Errorf("failedExample = %v, want no amount and failureCode REFUND_FAILED", failed)
+	}
+
+	assertRefundErrorExamples(t, "getRefund", endpoint, func(client *Client) (*Refund, error) {
+		return client.GetRefund(context.Background(), transactionID, "re_7c1e9a2b4d6f48a0b3c5d7e9f1a2b3c4")
+	})
 }
 
 // The contract examples themselves carry exactly their declared fields, so the
