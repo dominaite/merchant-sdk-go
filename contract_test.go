@@ -37,6 +37,7 @@ type endpointContract struct {
 	SavedCardExample          json.RawMessage `json:"savedCardExample"`
 	RetiredCardExample        json.RawMessage `json:"retiredCardExample"`
 	SuccessExample            json.RawMessage `json:"successExample"`
+	FieldsSuccessExample      json.RawMessage `json:"fieldsSuccessExample"`
 	DeclinedExample           json.RawMessage `json:"declinedExample"`
 	RefusalExample            json.RawMessage `json:"refusalExample"`
 	PartialExample            json.RawMessage `json:"partialExample"`
@@ -62,6 +63,7 @@ type responseContract struct {
 	RefundStatusVocabulary              []string `json:"refundStatusVocabulary"`
 	RefundErrorCodes                    []string `json:"refundErrorCodes"`
 	RefundFailureCodes                  []string `json:"refundFailureCodes"`
+	IntegrationVocabulary               []string `json:"integrationVocabulary"`
 	Endpoints                           struct {
 		Ping                  endpointContract `json:"ping"`
 		CreateCheckoutSession endpointContract `json:"createCheckoutSession"`

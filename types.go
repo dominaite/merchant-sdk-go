@@ -41,6 +41,14 @@ type CreateCheckoutSessionParams struct {
 	// themselves never reach you: you get an id, a brand and the last four digits.
 	SaveCard bool `json:"saveCard,omitempty"`
 
+	// Integration picks how the payer enters the card: IntegrationWidget (the
+	// default when empty) or IntegrationFields, card fields in your own page.
+	// Card fields are enabled per merchant on request; asking for them on an
+	// account without them is a 400 INVALID_SELECTION *APIError. It is part of
+	// the idempotency identity: replaying a key with a different Integration is
+	// IDEMPOTENCY_KEY_REUSED. Empty sends no integration field.
+	Integration Integration `json:"integration,omitempty"`
+
 	// IdempotencyKey is required. Derive it from the order with
 	// OrderIdempotencyKey: the same order at the same amount must produce the
 	// same key, so a reload, a Back button or a retry after a timeout replays
@@ -115,9 +123,36 @@ type CheckoutSession struct {
 	Currency string `json:"currency"`
 	// ExpiresAt is ISO 8601. Sessions are valid for 2 hours.
 	ExpiresAt string `json:"expiresAt"`
+	// Integration echoes what the session was created for: IntegrationWidget or
+	// IntegrationFields. For fields, CashierKey and CashierToken are the card
+	// fields key and session token.
+	Integration Integration `json:"integration"`
+	// ClientSecret is set only for IntegrationFields: the browser credential
+	// the checkout.js drop-in sends for this session. Opaque, at most 128
+	// characters, the same on every replay. Hand it to the payer's page with the
+	// other session values; never log it or keep it past the session.
+	ClientSecret string `json:"clientSecret,omitempty"`
 
 	// Raw is the unparsed payload, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
+}
+
+// Integration is how the payer enters the card on a checkout session.
+type Integration string
+
+// Integration values, in the contract's order.
+const (
+	// IntegrationWidget is the hosted cashier widget. The default.
+	IntegrationWidget Integration = "widget"
+	// IntegrationFields is card fields rendered in your own page by the
+	// checkout.js drop-in. Enabled per merchant on request.
+	IntegrationFields Integration = "fields"
+)
+
+// Integrations is the complete v1 integration vocabulary.
+var Integrations = []Integration{
+	IntegrationWidget,
+	IntegrationFields,
 }
 
 // Ping is what Ping returns: proof that your key, secret, signing and clock are
