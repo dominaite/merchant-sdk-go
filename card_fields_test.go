@@ -115,7 +115,7 @@ func TestCreateCheckoutSessionFieldsExampleMatchesContract(t *testing.T) {
 	if session.TransactionID != "7a6b5c4d-3e2f-4a1b-9c8d-7e6f5a4b3c2d" {
 		t.Errorf("TransactionID = %q", session.TransactionID)
 	}
-	if session.CashierKey != "ck_live_blox_8c7d6e5f4a3b2c1d" || session.CashierToken != "ctok_blox_0a1b2c3d4e5f6a7b" {
+	if session.CashierKey != "ck_live_fields_8c7d6e5f4a3b2c1d" || session.CashierToken != "ctok_fields_0a1b2c3d4e5f6a7b" {
 		t.Errorf("cashier key %q, token %q", session.CashierKey, session.CashierToken)
 	}
 }
