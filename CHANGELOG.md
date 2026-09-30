@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0 (unreleased)
+
+### Added
+
+- Card fields: `CreateCheckoutSessionParams.Integration` (`IntegrationWidget` or
+  `IntegrationFields`, omitted when empty), and `CheckoutSession.Integration` and
+  `CheckoutSession.ClientSecret` on the response. `ClientSecret` is set only for fields
+  sessions. Card fields are enabled per merchant on request; see the README.
+- Contract fixture: `integrationVocabulary`, the two new checkout fields and a fields session
+  example.
+
 ## 0.3.1
 
 ### Added

@@ -586,6 +586,49 @@ with the same order-derived idempotency key: within a few minutes of expiry that
 `DUPLICATE_REQUEST` (retry the same key shortly), and past that it succeeds with a fresh
 session. See [Recovering from a replay refusal](#recovering-from-a-replay-refusal).
 
+## Card fields
+
+Card fields put the card form in your own page instead of the hosted widget. They are enabled
+per merchant on request: ask Dominaite support. On an account without them,
+`IntegrationFields` is a 400 `INVALID_SELECTION` `*APIError`.
+
+Ask for them when you create the session:
+
+```go
+session, err := client.CreateCheckoutSession(ctx, dominaite.CreateCheckoutSessionParams{
+	Amount:         2500,
+	Currency:       "EUR",
+	OrderReference: "order-1042",
+	IdempotencyKey: key,
+	Integration:    dominaite.IntegrationFields, // empty = IntegrationWidget
+})
+```
+
+`session.Integration` echoes what the session was created for. A fields session also carries
+`ClientSecret`, the browser credential for that one session. Hand `TransactionID`,
+`Integration`, `CashierKey`, `CashierToken` and `ClientSecret` to the payment page, escaped like
+any templated value, and never log the secret. `Integration` is part of the idempotency
+identity: the same key with a different integration is `IDEMPOTENCY_KEY_REUSED`.
+
+```html
+<div id="checkout"></div>
+<script src="https://pay.dominaite.com/v1/checkout.js"></script>
+<script>
+  const checkout = Dominaite.checkout({
+    transactionId: "TRANSACTION_ID_FROM_SESSION",
+    integration: "fields",
+    cashierKey: "CASHIER_KEY_FROM_SESSION",
+    cashierToken: "CASHIER_TOKEN_FROM_SESSION",
+    clientSecret: "CLIENT_SECRET_FROM_SESSION",
+  })
+  checkout.on("success", () => { /* show the thank-you screen */ })
+  checkout.mount("#checkout")
+</script>
+```
+
+Browser events are for the payer's screen only. Mark the order paid only from the
+`payment.succeeded` webhook or a `GetStatus` read, exactly as with the widget.
+
 ## Stored payment methods (recurring)
 
 Set `SaveCard: true` when you create a session and, once that payment is approved, the gateway
