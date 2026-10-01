@@ -344,6 +344,7 @@ event.Data.SurchargeAmount   // *int64, nil when no surcharge is known
 event.Data.Currency
 event.Data.OriginalTransactionID  // parent, on refunds and reversals
 event.Data.IdempotencyKey    // your own mint key, when the gateway knows it
+event.Data.PSPReference      // processor reference on payment.* events; empty until known
 event.Data.StoredPaymentMethod  // *StoredPaymentMethod on payment.* events; nil when none
 event.Data.Sequence          // per-object order on agreement.* and charge.*; 0 when absent
 event.Data.Raw               // the data object, for fields not modelled above

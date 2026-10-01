@@ -241,6 +241,10 @@ type CheckoutStatus struct {
 	TransactionID  string `json:"transactionId"`
 	OrderID        string `json:"orderId"`
 	OrderReference string `json:"orderReference,omitempty"`
+	// PSPReference is the payment processor's reference for the transaction.
+	// Empty (null or absent on the wire) until known, and on a sale settled by
+	// reconciliation without a processor webhook. Older gateways omit it.
+	PSPReference string `json:"pspReference,omitempty"`
 	// Status is one of the Status* constants.
 	Status string `json:"status"`
 	// Amount is in MINOR units.
@@ -578,6 +582,13 @@ type WebhookData struct {
 	SurchargeAmount *int64 `json:"surchargeAmount"`
 	// Currency is ISO 4217.
 	Currency string `json:"currency"`
+
+	// PSPReference is the payment processor's reference for the transaction,
+	// on payment.* events. Empty (null or absent on the wire) until known, and
+	// on a sale settled by reconciliation without a processor webhook. Refund
+	// and cancel events carry the original sale's reference. charge.* events do
+	// not have it. Older gateways omit it.
+	PSPReference string `json:"pspReference"`
 
 	// OriginalTransactionID is the parent transaction for refunds and
 	// reversals. Empty on an original payment.
