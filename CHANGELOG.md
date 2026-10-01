@@ -10,6 +10,10 @@
   sessions. Card fields are enabled per merchant on request; see the README.
 - Contract fixture: `integrationVocabulary`, the two new checkout fields and a fields session
   example.
+- `WebhookData.PSPReference` on `payment.*` events and `CheckoutStatus.PSPReference` on the status
+  read: the payment processor's reference for the transaction. Empty until known, and on a sale
+  settled by reconciliation without a processor webhook. Refund and cancel events carry the
+  original sale's reference. `charge.*` events do not have it.
 
 ## 0.3.1
 
