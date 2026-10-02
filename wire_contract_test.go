@@ -26,7 +26,15 @@ type wireContract struct {
 		Storefront []wireErrorCode `json:"storefront"`
 	} `json:"errorCodes"`
 	WebhookEventCatalog []string `json:"webhookEventCatalog"`
-	SDKs                []string `json:"sdks"`
+	Wallets             struct {
+		WalletTypes     []string `json:"walletTypes"`
+		ReportingFields []struct {
+			Path     string `json:"path"`
+			Type     string `json:"type"`
+			Required bool   `json:"required"`
+		} `json:"reportingFields"`
+	} `json:"wallets"`
+	SDKs []string `json:"sdks"`
 }
 
 func loadWireContract(t *testing.T) wireContract {
@@ -62,6 +70,31 @@ func TestWireContractWebhookEventCatalog(t *testing.T) {
 	}
 	if !reflect.DeepEqual(events, wire.WebhookEventCatalog) {
 		t.Fatalf("Event* constants drifted from the gateway contract\n  sdk:     %v\n  gateway: %v", events, wire.WebhookEventCatalog)
+	}
+}
+
+func TestWireContractWalletTypes(t *testing.T) {
+	wire := loadWireContract(t)
+	if !reflect.DeepEqual(WalletTypes, wire.Wallets.WalletTypes) {
+		t.Fatalf("WalletTypes drifted from the gateway contract\n  sdk:     %v\n  gateway: %v", WalletTypes, wire.Wallets.WalletTypes)
+	}
+}
+
+// The wallet reporting fields sit on the status read. CheckoutStatus models
+// each one as an optional string.
+func TestWireContractWalletReportingFields(t *testing.T) {
+	wire := loadWireContract(t)
+	if len(wire.Wallets.ReportingFields) == 0 {
+		t.Fatal("the wire contract lists no wallet reporting fields")
+	}
+	modelled := jsonFieldNames(t, CheckoutStatus{})
+	for _, field := range wire.Wallets.ReportingFields {
+		if !contains(modelled, field.Path) {
+			t.Errorf("CheckoutStatus does not model the wallet reporting field %q", field.Path)
+		}
+		if field.Type != "string" || field.Required {
+			t.Errorf("%s: type %q, required %v; this SDK models it as an optional string", field.Path, field.Type, field.Required)
+		}
 	}
 }
 
