@@ -561,6 +561,20 @@ type WebhookEvent struct {
 // WebhookData is the payload of a WebhookEvent.
 type WebhookData struct {
 	TransactionID string `json:"transactionId"`
+	// OrderReference is your own order reference as stored on the
+	// transaction: what you sent on create session, unless you replaced it
+	// later. Match deliveries to your orders on it. Refund and cancel events
+	// carry the original payment's. Nullable on the wire; empty string when
+	// absent, which includes payments not started through the API.
+	OrderReference string `json:"orderReference"`
+	// OrderID is the hosted checkout order id, the same value as
+	// CheckoutStatus.OrderID. Nullable on the wire; empty string on refund and
+	// cancel events and for payments taken outside hosted checkout.
+	OrderID string `json:"orderId"`
+	// Description is the description you sent on create session. Nullable on
+	// the wire; empty string when none was given and on refund and cancel
+	// events.
+	Description string `json:"description"`
 	// Status is the wire status of the row, one of the Status* constants.
 	Status string `json:"status"`
 	// PreviousStatus is the status the row moved from. Nullable on the wire;
@@ -597,6 +611,16 @@ type WebhookData struct {
 	// cheapest way to match a delivery back to your order without a lookup.
 	// Empty when unknown, which today includes every refund.
 	IdempotencyKey string `json:"idempotencyKey"`
+
+	// PaymentMethodBrand is the lower-cased card brand (visa, mastercard, ...)
+	// once a card payment has been attempted. Nullable on the wire; empty
+	// string while the payment is open, for non-card methods, and when the
+	// provider did not report a brand.
+	PaymentMethodBrand string `json:"paymentMethodBrand"`
+	// PaymentMethodLast4 is the card's last four digits once a card payment
+	// has been attempted. Empty under the same conditions as
+	// PaymentMethodBrand.
+	PaymentMethodLast4 string `json:"paymentMethodLast4"`
 
 	// StoredPaymentMethod is the card a SaveCard session stored, on payment.*
 	// events: the same object as CheckoutStatus.StoredPaymentMethod, so its ID

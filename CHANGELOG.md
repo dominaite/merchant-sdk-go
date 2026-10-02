@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Webhook identification fields: `WebhookData.OrderReference`, `WebhookData.OrderID`,
+  `WebhookData.Description`, `WebhookData.PaymentMethodBrand` and `WebhookData.PaymentMethodLast4`
+  on `payment.*` events. Empty when null or absent. Refund and cancel events carry the original
+  payment's `OrderReference`. The README lists every identification field a `payment.*` event
+  carries.
+
 ## 0.4.0
 
 ### Added
