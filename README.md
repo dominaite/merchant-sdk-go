@@ -635,8 +635,8 @@ Set `SaveCard: true` when you create a session and, once that payment is approve
 keeps the card on file. You never see the card number or the provider token: `GetStatus` returns a
 `StoredPaymentMethod` with an opaque `ID` (`pm_` + 32 hex characters), the `Brand`, the `Last4` and
 the expiry, and that `ID` is what you charge and revoke with. Store it against your customer. (The
-gateway's `paymentMethod` field on the same status is something else: the string category of how
-the payer paid, `card`, `wallet` and so on; it is only reachable through `Raw`.)
+`PaymentMethod` field on the same status is something else: the string category of how the payer
+paid, `card`, `wallet` and so on. See [Status polling](#status-polling-fallback-and-the-reconciliation-sweep).)
 
 ```go
 key, err := dominaite.OrderIdempotencyKey("checkout-save", "sub-8817-first", 2500, "EUR")
@@ -828,6 +828,14 @@ if dominaite.IsPaid(status.Status) {
 	pollAgainLater(order)
 }
 ```
+
+`PaymentMethod` says how the payer paid (`card`, `wallet`, `bank_transfer` or `sepa`, exported as
+`PaymentMethodCategories`) and `WalletType` says which wallet when it is `wallet` (`apple_pay`,
+`google_pay`, `samsung_pay`, exported as `WalletTypes`). Both are empty while the payment is still
+open and on older transactions, and `WalletType` is empty for non-wallet payments. This is
+reporting data, not a money-flow switch: a wallet payment refunds, captures and disputes exactly
+like a card payment, so do not branch payment handling on it. A `WalletType` outside `WalletTypes`
+is a wallet this SDK does not name yet; treat it as valid, not as an error.
 
 `requires_capture` is **not** "unpaid": the payer has already paid and the funds are held
 awaiting capture. Never treat it as an abandoned order.
