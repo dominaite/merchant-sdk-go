@@ -70,11 +70,10 @@ Set your credentials and the environment you are pointing at:
 export DOMINAITE_KEY_ID=dmk_...      # Website integration tab
 export DOMINAITE_SECRET=dms_...      # shown once when you generated the key
 export DOMINAITE_WEBHOOK_SECRET=whsec_...  # shown once when you created the endpoint
-# Dev: the payments function app, whose Azure Functions route prefix is /api.
-# Confirm the host for your environment before the first call.
-export DOMINAITE_BASE_URL=https://func-dom-gw-payments-dev-gwc-01.azurewebsites.net/api
 # Production needs no DOMINAITE_BASE_URL - the SDK defaults to
 # https://api.dominaite.com/payments
+# For a test environment, set it to that environment's base URL:
+# export DOMINAITE_BASE_URL=https://...
 ```
 
 Ping before your first mint. It is one signed GET that creates nothing, so anything that
