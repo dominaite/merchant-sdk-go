@@ -335,6 +335,11 @@ event.Type                   // one of the Event* constants
 event.APIVersion             // dated payload version, e.g. "2026-09-25"; empty from older gateways
 event.CreatedAt              // ISO 8601 UTC instant of the transition, not of delivery
 event.Data.TransactionID
+event.Data.OrderReference    // your own order reference: match deliveries to orders on it
+event.Data.OrderID           // hosted checkout order id; empty on refunds and cancellations
+event.Data.Description       // what you sent on create session; empty when none
+event.Data.PaymentMethodBrand  // lower-cased card brand once a card was tried; empty otherwise
+event.Data.PaymentMethodLast4  // last four card digits, same conditions as the brand
 event.Data.Status            // wire status, one of the Status* constants
 event.Data.PreviousStatus    // empty when the wire sent null
 event.Data.Amount            // MINOR units: what you are PAID
@@ -362,6 +367,12 @@ surcharge of zero".
 
 `IdempotencyKey` is the cheapest way to match a delivery back to your own order without a
 lookup. It is empty when the gateway does not know it, which today includes every refund.
+
+Every `payment.*` event carries the identification fields `TransactionID`, `OrderReference`,
+`OrderID`, `PSPReference`, `Description`, `PaymentMethodBrand`, `PaymentMethodLast4`,
+`IdempotencyKey` and `OriginalTransactionID`. Match deliveries to your orders on
+`OrderReference`: refund and cancel events carry the original payment's reference, with the
+refunded payment in `OriginalTransactionID`. A null on the wire reads as an empty string.
 
 `StoredPaymentMethod` is the card a `SaveCard` session stored: the same `StoredPaymentMethod`
 type `GetStatus` returns, so its `ID` is what `ChargePaymentMethod` takes. It is set on

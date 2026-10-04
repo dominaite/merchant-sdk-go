@@ -13,6 +13,11 @@
   constants.
 - Contract fixtures: the `wallets` section and `paymentMethod`/`walletType` in the status read
   fields and examples.
+- Webhook identification fields: `WebhookData.OrderReference`, `WebhookData.OrderID`,
+  `WebhookData.Description`, `WebhookData.PaymentMethodBrand` and `WebhookData.PaymentMethodLast4`
+  on `payment.*` events. Empty when null or absent. Refund and cancel events carry the original
+  payment's `OrderReference`. The README lists every identification field a `payment.*` event
+  carries.
 
 ## 0.4.0
 
