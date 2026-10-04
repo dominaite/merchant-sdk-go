@@ -4,6 +4,15 @@
 
 ### Added
 
+- Wallet reporting: `CheckoutStatus.PaymentMethod` (how the payer paid) and
+  `CheckoutStatus.WalletType` (which wallet, when it was one). Empty while the payment is open
+  and on older transactions; an unknown `WalletType` is a valid wallet, not an error. Reporting
+  data only: a wallet payment refunds, captures and disputes like a card payment.
+- `PaymentMethodCategories` (`card`, `wallet`, `bank_transfer`, `sepa`) and `WalletTypes`
+  (`apple_pay`, `google_pay`, `samsung_pay`), with the `PaymentMethod*` and `WalletType*`
+  constants.
+- Contract fixtures: the `wallets` section and `paymentMethod`/`walletType` in the status read
+  fields and examples.
 - Webhook identification fields: `WebhookData.OrderReference`, `WebhookData.OrderID`,
   `WebhookData.Description`, `WebhookData.PaymentMethodBrand` and `WebhookData.PaymentMethodLast4`
   on `payment.*` events. Empty when null or absent. Refund and cancel events carry the original

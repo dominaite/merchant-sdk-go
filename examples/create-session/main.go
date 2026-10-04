@@ -3,7 +3,7 @@
 //
 //	export DOMINAITE_KEY_ID=dmk_...
 //	export DOMINAITE_SECRET=dms_...
-//	export DOMINAITE_BASE_URL=https://func-dom-gw-payments-dev-gwc-01.azurewebsites.net/api
+//	export DOMINAITE_BASE_URL=https://...   # a test environment only
 //	go run ./examples/create-session
 //
 // Leave DOMINAITE_BASE_URL unset to hit production.

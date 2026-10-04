@@ -204,6 +204,42 @@ var Statuses = []string{
 	StatusAbandoned,
 }
 
+// Payment method categories reported in CheckoutStatus.PaymentMethod.
+const (
+	PaymentMethodCard         = "card"
+	PaymentMethodWallet       = "wallet"
+	PaymentMethodBankTransfer = "bank_transfer"
+	PaymentMethodSepa         = "sepa"
+)
+
+// PaymentMethodCategories is every payment method category the merchant API
+// reports, in the gateway's own order.
+//
+// Reporting data, not a money-flow switch: a wallet payment refunds, captures
+// and disputes exactly like a card payment.
+var PaymentMethodCategories = []string{
+	PaymentMethodCard,
+	PaymentMethodWallet,
+	PaymentMethodBankTransfer,
+	PaymentMethodSepa,
+}
+
+// Wallets reported in CheckoutStatus.WalletType.
+const (
+	WalletTypeApplePay   = "apple_pay"
+	WalletTypeGooglePay  = "google_pay"
+	WalletTypeSamsungPay = "samsung_pay"
+)
+
+// WalletTypes is the wallets the gateway names today, pinned against the
+// published contract. The field can carry a lower-cased identifier not in this
+// list yet: treat an unknown value as a valid wallet, not an error.
+var WalletTypes = []string{
+	WalletTypeApplePay,
+	WalletTypeGooglePay,
+	WalletTypeSamsungPay,
+}
+
 // IsPaid reports whether a status means the payment is complete: true for
 // StatusSucceeded only. StatusRequiresCapture is not paid yet (the funds are
 // held, not captured), and neither is anything this SDK does not recognise.
@@ -251,8 +287,16 @@ type CheckoutStatus struct {
 	Amount         int64  `json:"amount"`
 	Currency       string `json:"currency"`
 	RefundedAmount int64  `json:"refundedAmount,omitempty"`
-	CreatedAt      string `json:"createdAt"`
-	UpdatedAt      string `json:"updatedAt,omitempty"`
+	// PaymentMethod is how the payer paid, one of PaymentMethodCategories.
+	// Empty (null or absent on the wire) while the payment is still open, with
+	// no method chosen yet, and on older transactions. Reporting data only.
+	PaymentMethod string `json:"paymentMethod,omitempty"`
+	// WalletType is which wallet, when PaymentMethod is PaymentMethodWallet.
+	// A value outside WalletTypes is a valid wallet this SDK does not name yet,
+	// not an error. Empty (null or absent on the wire) for non-wallet payments.
+	WalletType string `json:"walletType,omitempty"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt,omitempty"`
 	// ExpiresAt is present while the session is still payable.
 	ExpiresAt string `json:"expiresAt,omitempty"`
 	// StoredPaymentMethod is the card kept on file by a session created with
@@ -262,9 +306,8 @@ type CheckoutStatus struct {
 	// or abandoned ones. Store StoredPaymentMethod.ID against your customer -
 	// it is what Client.ChargePaymentMethod takes.
 	//
-	// Not to be confused with the gateway's paymentMethod field, which is the
-	// string category of how the payer paid ("card", "wallet", ...) and is only
-	// reachable through Raw.
+	// Not to be confused with PaymentMethod, which is the string category of
+	// how the payer paid ("card", "wallet", ...).
 	StoredPaymentMethod *StoredPaymentMethod `json:"storedPaymentMethod,omitempty"`
 
 	// Raw is the unparsed payload, for fields this struct does not model yet.
