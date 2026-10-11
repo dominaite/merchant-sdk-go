@@ -66,6 +66,11 @@ const (
 	// read, change and archive one.
 	PlansPath = "/merchant-api/plans"
 
+	// AgreementsPath is the canonical path of subscription agreements. POST
+	// creates an agreement; GET and DELETE AgreementsPath + "/{agreementId}"
+	// read and cancel one.
+	AgreementsPath = "/merchant-api/agreements"
+
 	// PingPath is the credentials-and-clock smoke test. It creates nothing.
 	PingPath = "/merchant-api/ping"
 

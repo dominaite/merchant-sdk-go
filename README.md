@@ -829,6 +829,76 @@ A plan that is not yours is a 404 `*APIError` with `ErrorCode` `PLAN_NOT_FOUND`.
 API refused is a 400 `*APIError`, and `Raw` carries `error.validationErrors`. A 5xx is a
 `*TransportError`: nothing was created, so retry with the same key.
 
+### Agreements
+
+An agreement subscribes one customer to an active plan. It is created `pending`, and nothing is
+charged:
+
+```go
+agreement, err := client.CreateAgreement(ctx, dominaite.CreateAgreementParams{
+	PlanID:            plan.ID,
+	CustomerReference: "customer-8817", // your own id for the customer
+	IdempotencyKey:    "subscription-8817-gold",
+})
+// agreement.ID == "agr_...", agreement.Status == dominaite.AgreementStatusPending
+```
+
+The subscription session takes the first payment, saves the card and activates the agreement.
+It is `CreateCheckoutSession` with `AgreementID` and `Consent`:
+
+```go
+session, err := client.CreateCheckoutSession(ctx, dominaite.CreateCheckoutSessionParams{
+	Amount:         agreement.Amount, // exactly the agreement's amount on a plan without a trial
+	Currency:       agreement.Currency,
+	OrderReference: "subscription-8817-first",
+	AgreementID:    agreement.ID,
+	Consent: &dominaite.Consent{
+		TextVersion: dominaite.ConsentTextVersionRecurring202609, // the platform text your page showed
+		AcceptedAt:  "2026-10-01T09:30:00Z",
+		IP:          customerIP,
+	},
+	IdempotencyKey: "subscription-8817-first",
+})
+```
+
+On a plan without a trial, the session's payment is the first period. On a plan with a trial,
+the session charges the amount you send, and the first scheduled charge comes when the trial
+ends. The session saves the card whatever `SaveCard` says. A session refusal is a
+`*RefusalError` with one of the `SubscriptionSessionRefusalCodes`. After activation the
+platform charges the card every period. Follow it with the `agreement.*` and `charge.*` webhook
+events, or read the agreement with `GetAgreement`.
+
+To bill a card the customer already saved, set `StoredPaymentMethodID` on `CreateAgreement`.
+`Consent` is then required: your own label for the wording the customer accepted, when, and from
+which IP address. A variable-amount subscription (seat plus usage) sets `MaxAmountPerPeriod`, the
+most one charge may be. It also requires `Consent`. A subscription session cannot take the first
+payment of a variable agreement: it refuses with `AGREEMENT_VARIABLE_AMOUNT_UNSUPPORTED`.
+
+`CancelAgreement` cancels from `pending`, `active` or `past_due`: no further charge is
+scheduled, and a charge already placed is not reversed. Cancelling a cancelled agreement
+succeeds again. The platform never cancels an agreement on its own: a `past_due` agreement stays
+`past_due` until the period is paid on another card or you cancel it. `PastDueReason` says why
+it is past due.
+
+Coded refusals of the plan and agreement routes are an `*APIError` with `HTTPStatus` and
+`ErrorCode`. None of them changes on a retry:
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `PLAN_NOT_FOUND` | 404 | No plan with this id under your account. |
+| `PLAN_NOT_ACTIVE` | 409 | `CreateAgreement`: the plan is archived. |
+| `AGREEMENT_NOT_FOUND` | 404 | No agreement with this id under your account. |
+| `AGREEMENT_ENDED` | 409 | `CancelAgreement`: the agreement already completed or failed. |
+| `PAYMENT_METHOD_NOT_FOUND` | 404 | No stored payment method with this id under your account. |
+| `PAYMENT_METHOD_NOT_ACTIVE` | 409 | The stored card is revoked, expired or retired. |
+| `PAYMENT_METHOD_CURRENCY_MISMATCH` | 422 | The card was saved from a payment in another currency than the plan's. |
+| `PAYMENT_METHOD_CURRENCY_UNKNOWN` | 422 | The currency of the card cannot be established. |
+| `MAX_AMOUNT_BELOW_PLAN_AMOUNT` | 422 | `MaxAmountPerPeriod` is below the plan's amount. |
+| `AGREEMENT_CONSENT_REQUIRED` | 422 | A stored card or a `MaxAmountPerPeriod` without `Consent`. |
+| `IDEMPOTENCY_KEY_REUSED` | 422 | The key was first used for a different plan or agreement. |
+
+A field the API refused is a 400 `*APIError`, and `Raw` carries `error.validationErrors`.
+
 ## Refunds
 
 `CreateRefund` refunds a card-not-present payment of your own account, in full or in part.

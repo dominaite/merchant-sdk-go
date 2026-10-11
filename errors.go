@@ -179,15 +179,40 @@ var SubscriptionSessionRefusalCodes = []string{
 }
 
 // Codes of the plan and agreement routes. They arrive on APIError.ErrorCode,
-// with the status on APIError.HTTPStatus. ErrorCodeIdempotencyKeyReused (422:
-// the key was first used for a different plan or agreement) arrives there
-// too. The list is additive: treat a 4xx code you do not know as not
-// retryable. A 5xx is a *TransportError: nothing was created, so retry with
-// the same key.
+// with the status on APIError.HTTPStatus. ErrorCodeAgreementNotFound (404),
+// ErrorCodeAgreementConsentRequired (422: CreateAgreement names a stored
+// payment method or a MaxAmountPerPeriod without Consent) and
+// ErrorCodeIdempotencyKeyReused (422: the key was first used for a different
+// plan or agreement) arrive there too. The list is additive: treat a 4xx code
+// you do not know as not retryable. A 5xx is a *TransportError: nothing was
+// created, so retry with the same key.
 const (
 	// ErrorCodePlanNotFound (404): no plan with this id under your account.
 	// The plan_ id is case-sensitive; send it exactly as it was returned.
 	ErrorCodePlanNotFound = "PLAN_NOT_FOUND"
+	// ErrorCodePlanNotActive (409, CreateAgreement): the plan is archived.
+	ErrorCodePlanNotActive = "PLAN_NOT_ACTIVE"
+	// ErrorCodeAgreementEnded (409, CancelAgreement): the agreement already
+	// completed or failed, so there is nothing left to cancel.
+	ErrorCodeAgreementEnded = "AGREEMENT_ENDED"
+	// ErrorCodePaymentMethodNotFound (404, CreateAgreement): no stored
+	// payment method with this id under your account.
+	ErrorCodePaymentMethodNotFound = "PAYMENT_METHOD_NOT_FOUND"
+	// ErrorCodePaymentMethodNotActive (409, CreateAgreement): the stored
+	// payment method is revoked, expired or retired. Leave it out and let the
+	// subscription session save a fresh card.
+	ErrorCodePaymentMethodNotActive = "PAYMENT_METHOD_NOT_ACTIVE"
+	// ErrorCodePaymentMethodCurrencyMismatch (422, CreateAgreement): the card
+	// was saved from a payment in another currency than the plan's.
+	ErrorCodePaymentMethodCurrencyMismatch = "PAYMENT_METHOD_CURRENCY_MISMATCH"
+	// ErrorCodePaymentMethodCurrencyUnknown (422, CreateAgreement): the
+	// currency of the card cannot be established, so it cannot back an
+	// agreement. Leave it out and let the subscription session save a fresh
+	// card.
+	ErrorCodePaymentMethodCurrencyUnknown = "PAYMENT_METHOD_CURRENCY_UNKNOWN"
+	// ErrorCodeMaxAmountBelowPlanAmount (422, CreateAgreement):
+	// MaxAmountPerPeriod is below the plan's amount.
+	ErrorCodeMaxAmountBelowPlanAmount = "MAX_AMOUNT_BELOW_PLAN_AMOUNT"
 )
 
 // ErrorCodeInsufficientScope (HTTP 403, on every route that needs a scope):

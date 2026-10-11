@@ -43,6 +43,10 @@
 - Plans: `CreatePlan`, `ListPlans`, `GetPlan`, `UpdatePlan` and `DeletePlan` (archives), on
   `/merchant-api/plans`. `UpdatePlan` sends no idempotency key. Plan ids are sent exactly as
   given. New `PlanStatus*` and `IntervalUnit*` constants, and `ErrorCodePlanNotFound`.
+- Agreements: `CreateAgreement`, `GetAgreement` and `CancelAgreement`, on
+  `/merchant-api/agreements`. `Agreement` models every field the API returns, with
+  `PastDueReason`, `PastDueAt` and the consent receipt. New `AgreementStatus*` and
+  `PastDueReason*` constants, and error code constants for the agreement refusals.
 - `APIError.Raw`: the whole envelope of a rejection, so `error.params` and
   `error.validationErrors` are readable.
 - `AuthError.HTTPStatus`: 401 or 403.
