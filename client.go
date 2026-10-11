@@ -503,10 +503,14 @@ func (c *Client) GetStatus(ctx context.Context, transactionID string) (*Checkout
 // The HTTP status is the contract on this route. 201 (200 on a replay) returns
 // the charge, Status ChargeStatusSucceeded, ChargeStatusPending or
 // ChargeStatusCancelled. 402 returns the charge too: a decline is not an
-// error, the charge has Status ChargeStatusFailed plus a DeclineClass telling
-// you whether to give up on the card (hard), wait (soft_funds, soft_other) or
-// bring the customer back for a hosted session (soft_sca_required).
+// error. The charge has Status ChargeStatusFailed, and DeclineClass, when it
+// is set, tells you whether to give up on the card (hard), wait (soft_funds,
+// soft_other) or bring the customer back for a hosted session
+// (soft_sca_required). The 402 often has no DeclineClass yet: read
+// GetStatus(charge.TransactionID) a moment later for it.
 // ChargeStatusPending is not terminal - poll GetStatus(charge.TransactionID).
+//
+// params.AgreementID charges under an agreement, on its terms.
 //
 // Errors it returns:
 //   - *ValidationError: bad arguments; nothing was sent.
@@ -540,8 +544,8 @@ func (c *Client) ChargePaymentMethod(ctx context.Context, paymentMethodID string
 
 	// 201 (200 on a durable replay): the charge was placed, whatever its
 	// status. 402: the provider declined; the envelope says success=false but
-	// the charge is right there, Status failed with its decline class, so it
-	// is a result, not an error.
+	// the charge is right there with Status failed, so it is a result, not an
+	// error.
 	if charge != nil && (reply.success() || reply.status == http.StatusPaymentRequired) {
 		return charge, nil
 	}

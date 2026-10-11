@@ -702,6 +702,8 @@ case dominaite.ChargeStatusPending:
 	// Not terminal. Poll GetStatus(charge.TransactionID), or wait for the webhook.
 case dominaite.ChargeStatusFailed:
 	// HTTP 402 from the gateway, but not an error: branch on the class, log the code.
+	// The class can be empty here: the 402 carries it only for soft_sca_required. Read
+	// GetStatus(charge.TransactionID) a moment later for the others. An empty class is not hard.
 	// DeclineClassHard            - give up on this card, ask the customer for another one
 	// DeclineClassSoftFunds       - insufficient funds, retry later (not in a loop)
 	// DeclineClassSoftSCARequired - the issuer wants the customer present: send them through a
@@ -725,13 +727,22 @@ if errors.As(err, &revokeErr) && revokeErr.ErrorCode == dominaite.RevokeErrorMer
 A charge is signed exactly like a session and carries an `Idempotency-Key`, so a retry after a
 timeout with the **same** key never charges the card twice: the gateway replays its first answer,
 HTTP status included. The HTTP status is the contract on this route: 201 (or 200 on a replay)
-returns the charge, 402 returns the charge too (`Status` `failed` plus `DeclineClass`), and 409,
+returns the charge, 402 returns the charge too (`Status` `failed`), and 409,
 422, 502 and 503 return a `*ChargeError` with `ErrorCode`, `HTTPStatus`, the gateway's message
 and, when the gateway attached the charge row, `Charge` and `TransactionID`. Only authentication
 (401/403), an id that is not yours (404, `*APIError` with `ErrorCode` `PAYMENT_METHOD_NOT_FOUND`),
 validation (400, `*APIError`), rate limiting (429) and network failures or a 5xx without a code
 keep their generic errors. `DeclineClass` and `DeclineCode` are empty unless the charge was
-declined; the gateway omits them on the wire.
+declined. `DeclineClass` can be empty on a decline too: the 402 carries it only when the decline
+code alone decides it (`soft_sca_required`), and the status read carries the class of every
+other decline a moment later. An empty class is not `hard`; if you retry, retry as for
+`soft_other`.
+
+Set `AgreementID` to charge under an [agreement](#subscriptions-plans-and-agreements). The charge
+must then be on the agreement's terms: its payment method, its consent, its currency and its
+amount rule. A charge off those terms is refused with a 422 `*ChargeError` whose `ErrorCode`
+names the rule. An agreement that is not yours is a 404 `*APIError` with `ErrorCode`
+`AGREEMENT_NOT_FOUND`.
 
 Revoking signs an empty key and an empty body, like `GetStatus`. A revoke that fails with
 `*RevokeError` changed nothing: `MERCHANT_API_UNAVAILABLE` (503) is retryable,
@@ -893,6 +904,21 @@ over returns a `*RateLimitError`.
 
 Both response types also carry `Raw` (`json.RawMessage`) with the unparsed payload, for fields
 the structs do not model yet.
+
+## Fields the SDK does not model yet
+
+Every request struct with a body has an `Extra` map: `CreateCheckoutSessionParams`,
+`ChargePaymentMethodParams` and `CreateRefundParams`. The SDK merges its keys into the JSON body
+and signs the result. A key in `Extra` replaces the modelled field of the same name. Use it for
+a field the API added after this SDK version; you do not need a new SDK release for it.
+
+```go
+params.Extra = map[string]any{"someNewField": "value"}
+```
+
+Every response type has a `Raw` field with the unparsed JSON, for fields the SDK does not model
+yet. Status values, decline classes and event types are plain strings: a value this SDK does not
+know is never an error.
 
 ## Errors
 

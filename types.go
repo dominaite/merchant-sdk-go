@@ -469,6 +469,16 @@ type ChargePaymentMethodParams struct {
 	OrderReference string `json:"orderReference"`
 	Description    string `json:"description,omitempty"`
 
+	// AgreementID is the agr_ id of the agreement this charge is made under.
+	// Empty charges the card on your own authority, as with any card on file:
+	// only the per-charge cap and the volume limits apply. When set, the
+	// charge must be on the agreement's terms: its payment method, its
+	// consent, its currency and its amount rule. The gateway refuses anything
+	// else with a 422 *ChargeError, or a 404 *APIError (AGREEMENT_NOT_FOUND)
+	// for an agreement that is not yours. The charge records the agreement,
+	// so a dispute can be answered with the consent the customer gave.
+	AgreementID string `json:"agreementId,omitempty"`
+
 	// IdempotencyKey is required. Derive it from what you are charging for
 	// (the order, the billing period), never per attempt: retrying with the
 	// same key never charges the card twice, so on a timeout retry with the
@@ -476,11 +486,31 @@ type ChargePaymentMethodParams struct {
 	// body. 1 to 100 visible ASCII characters; anything else is refused with a
 	// *ValidationError before anything is sent.
 	IdempotencyKey string `json:"-"`
+
+	// Extra carries any additional field the API accepts that this struct does
+	// not model yet. Keys here are merged into the JSON body and replace a
+	// modelled field of the same name.
+	Extra map[string]any `json:"-"`
+}
+
+// MarshalJSON emits the request body: the modelled fields in declaration order,
+// with Extra merged in. IdempotencyKey is excluded; it is a header, not a body
+// field.
+func (p ChargePaymentMethodParams) MarshalJSON() ([]byte, error) {
+	// The local type drops this method, so json.Marshal does not recurse.
+	type params ChargePaymentMethodParams
+
+	base, err := marshalNoEscape(params(p))
+	if err != nil {
+		return nil, err
+	}
+	return mergeExtra(base, p.Extra)
 }
 
 // Charge status values returned by ChargePaymentMethod, in the gateway's own
 // order. ChargeStatusSucceeded: the money moved. ChargeStatusFailed: it did
-// not; on a 402 DeclineClass says why. ChargeStatusPending is not terminal:
+// not; DeclineClass says why, when the class is known. ChargeStatusPending is
+// not terminal:
 // keep polling GetStatus on the charge's TransactionID. ChargeStatusCancelled:
 // an authorization voided before capture, no money moved.
 const (
@@ -534,11 +564,16 @@ type PaymentMethodCharge struct {
 	// Status is one of the ChargeStatus* constants. Treat anything you do not
 	// recognise as still open.
 	Status string `json:"status"`
-	// DeclineClass is one of the DeclineClass* constants, set on a 402 decline.
-	// Empty everywhere else (the gateway omits it on the wire).
+	// DeclineClass is one of the DeclineClass* constants on a failed charge,
+	// when the class is known. The 402 answer carries it only when the decline
+	// code alone decides it (soft_sca_required). For every other decline it is
+	// empty here, and the status read (GetStatus on TransactionID) carries the
+	// class a moment later. A class that stays empty means the decline came
+	// without one: do not read it as hard; if you retry, retry as for
+	// DeclineClassSoftOther. Empty on every status other than failed.
 	DeclineClass string `json:"declineClass,omitempty"`
-	// DeclineCode is the raw decline code, for your logs; branch on
-	// DeclineClass instead. Empty when DeclineClass is.
+	// DeclineCode is the issuer's decline code, verbatim, for your logs;
+	// branch on DeclineClass instead. Empty unless the charge failed.
 	DeclineCode string `json:"declineCode,omitempty"`
 	// TransactionID is the transaction the charge created; readable with
 	// GetStatus.
@@ -567,6 +602,25 @@ type CreateRefundParams struct {
 	// 100 visible ASCII characters; anything else is refused with a
 	// *ValidationError before anything is sent.
 	IdempotencyKey string `json:"-"`
+
+	// Extra carries any additional field the API accepts that this struct does
+	// not model yet. Keys here are merged into the JSON body and replace a
+	// modelled field of the same name.
+	Extra map[string]any `json:"-"`
+}
+
+// MarshalJSON emits the request body: the modelled fields, with Extra merged
+// in. A nil Amount is left out. IdempotencyKey is excluded; it is a header,
+// not a body field.
+func (p CreateRefundParams) MarshalJSON() ([]byte, error) {
+	// The local type drops this method, so json.Marshal does not recurse.
+	type params CreateRefundParams
+
+	base, err := marshalNoEscape(params(p))
+	if err != nil {
+		return nil, err
+	}
+	return mergeExtra(base, p.Extra)
 }
 
 // Refund status values, in the gateway's own order. RefundStatusPending: queued.
