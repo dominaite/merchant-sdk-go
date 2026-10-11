@@ -52,6 +52,10 @@
   `webhooks:manage` scope. `WebhookEndpoint.Secret` is set on the first answer only; printing
   the endpoint and JSON logging never show it. New `WebhookEndpointStatus*` constants and
   `ErrorCodeWebhook*` codes.
+- `ListTransactions`: one page of your card-not-present payments in a [from, to) window,
+  oldest first, with `NextCursor` paging. It needs a key with the `transactions:read` scope.
+  The SDK signs the path only; the query string is not part of the signature. New
+  `TransactionType*` constants.
 - `APIError.Raw`: the whole envelope of a rejection, so `error.params` and
   `error.validationErrors` are readable.
 - `AuthError.HTTPStatus`: 401 or 403.

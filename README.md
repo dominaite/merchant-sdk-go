@@ -1098,6 +1098,53 @@ over returns a `*RateLimitError`.
 Both response types also carry `Raw` (`json.RawMessage`) with the unparsed payload, for fields
 the structs do not model yet.
 
+## Listing your transactions (reporting)
+
+`ListTransactions` reads your card-not-present payments, one page at a time: checkout payments,
+saved-card charges, subscription charges and verify-only sessions. It needs a key with the
+`transactions:read` scope. A key with the `payments` scope cannot hold it, so use a separate
+reporting key.
+
+```go
+reporting, err := dominaite.New(reportingKeyID, reportingSecret)
+params := dominaite.ListTransactionsParams{
+	From: "2026-10-01T00:00:00Z", // inclusive
+	To:   "2026-11-01T00:00:00Z", // exclusive, at most 31 days after From
+}
+for {
+	page, err := reporting.ListTransactions(ctx, params)
+	if err != nil {
+		return err
+	}
+	for _, tx := range page.Items {
+		record(tx) // tx.TransactionID, tx.Type, tx.Status, tx.Amount, tx.RefundedAmount, ...
+	}
+	if page.NextCursor == "" {
+		break
+	}
+	params.Cursor = page.NextCursor
+}
+```
+
+- The window is [`From`, `To`) on `CreatedAt`, in ISO 8601 UTC. Use the Z form:
+  `t.UTC().Format(time.RFC3339)`.
+- The rows come oldest first. Send `NextCursor` back as `Cursor`, with the same `From`, `To`
+  and `Status`, until it is empty. Paging never repeats or skips a row.
+- `Limit` sets the page size, 1 to 100. 0 keeps the API default of 50. `Status` keeps only the
+  payments that are now in that status.
+- A row has its status at the time of the read. For a statement, end the window a few minutes
+  in the past, so that payments still being written are not missed. Read the window again
+  later to pick up changes such as refunds.
+- A refund is not a row of its own: it shows on its payment as `RefundedAmount` and `Status`.
+- `Type` is one of `TransactionTypes`. A `verification` row saved a card and is not a purchase,
+  so leave it out of revenue.
+- A key bound to a storefront lists the payments of that storefront only. Fees are not part of
+  this read.
+- The SDK signs the path only. The query string is not part of the signature.
+
+A window, status, limit or cursor that the API refuses is a 400 `*APIError` with `ErrorCode`
+`VALIDATION_ERROR`. `Raw` carries one `error.validationErrors` entry for each field.
+
 ## Fields the SDK does not model yet
 
 Every request struct with a body has an `Extra` map: `CreateCheckoutSessionParams`,

@@ -76,6 +76,10 @@ const (
 	// deletes one.
 	WebhooksPath = "/merchant-api/webhooks"
 
+	// TransactionsPath is the canonical path of your transaction list. GET
+	// reads one page. The query string is never part of the signature.
+	TransactionsPath = "/merchant-api/transactions"
+
 	// PingPath is the credentials-and-clock smoke test. It creates nothing.
 	PingPath = "/merchant-api/ping"
 
@@ -1084,6 +1088,12 @@ func isGenericFailureStatus(status int) bool {
 // for the route to read, because the payment-method routes answer 402, 409,
 // 422, 502 and 503 with a body the caller needs.
 func (c *Client) send(ctx context.Context, method, path, body, idempotencyKey string) (*response, error) {
+	return c.sendQuery(ctx, method, path, "", body, idempotencyKey)
+}
+
+// sendQuery is send with an encoded query string. The query goes into the
+// URL only: the signature covers the canonical path, never the query.
+func (c *Client) sendQuery(ctx context.Context, method, path, query, body, idempotencyKey string) (*response, error) {
 	if ctx == nil {
 		return nil, newValidationError("ctx must not be nil")
 	}
@@ -1102,7 +1112,11 @@ func (c *Client) send(ctx context.Context, method, path, body, idempotencyKey st
 	if body != "" {
 		reader = strings.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	target := c.baseURL + path
+	if query != "" {
+		target += "?" + query
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, reader)
 	if err != nil {
 		return nil, newValidationError("Could not build the request: " + err.Error())
 	}

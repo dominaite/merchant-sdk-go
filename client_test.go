@@ -40,6 +40,7 @@ func testParams() CreateCheckoutSessionParams {
 type recordedCall struct {
 	Method string
 	Path   string
+	Query  string
 	Header http.Header
 	Body   string
 }
@@ -66,6 +67,7 @@ func newTestServer(t *testing.T, replies ...reply) (*httptest.Server, func() []r
 		calls = append(calls, recordedCall{
 			Method: r.Method,
 			Path:   r.URL.Path,
+			Query:  r.URL.RawQuery,
 			Header: r.Header.Clone(),
 			Body:   string(body),
 		})
