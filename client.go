@@ -1020,10 +1020,16 @@ func (c *Client) send(ctx context.Context, method, path, body, idempotencyKey st
 		))
 		rateErr.ErrorCode = firstNonEmpty(inner.ErrorCode, envelope.Error.code())
 		rateErr.RetryAfterSeconds, rateErr.HasRetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
+		if parsedJSON {
+			rateErr.Raw = json.RawMessage(raw)
+		}
 		return nil, rateErr
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	case resp.StatusCode == http.StatusUnauthorized:
 		code := firstNonEmpty(inner.ErrorCode, envelope.Error.code(), "UNAUTHORIZED")
-		return nil, newAuthError(code, "Authentication failed - check your key id, secret, and server clock.")
+		return nil, newAuthError(resp.StatusCode, code, "Authentication failed - check your key id, secret, and server clock.")
+	case resp.StatusCode == http.StatusForbidden:
+		code := firstNonEmpty(inner.ErrorCode, envelope.Error.code(), "UNAUTHORIZED")
+		return nil, newAuthError(resp.StatusCode, code, forbiddenMessage(code, firstNonEmpty(inner.ErrorMessage, envelope.Error.message())))
 	}
 
 	return &response{
@@ -1034,6 +1040,21 @@ func (c *Client) send(ctx context.Context, method, path, body, idempotencyKey st
 		err:      envelope.Error,
 		parsed:   parsedJSON,
 	}, nil
+}
+
+// forbiddenMessage is the message of a 403. The clock hint is for 401 only: a
+// 403 means the request was signed correctly, so the key id, the secret and
+// the clock are fine, and the key may not do this.
+func forbiddenMessage(code, apiMessage string) string {
+	switch code {
+	case ErrorCodeInsufficientScope:
+		// The API's own message names the scope the route needs.
+		scope := strings.TrimRight(firstNonEmpty(apiMessage, "This API key does not have the scope this route requires"), ".")
+		return scope + ". A key's scopes are fixed when it is issued: use a key that holds this scope."
+	case ErrorCodeVerifyOnlyNotEnabled:
+		return "Verify-only sessions are not enabled for this account. We switch it on for your account: ask Dominaite support."
+	}
+	return fmt.Sprintf("Access denied (HTTP 403 %s): this API key may not call this route.", code)
 }
 
 // readLimited reads a response body up to maxResponseBytes. A body that runs

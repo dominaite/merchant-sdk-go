@@ -21,6 +21,18 @@
 - Wire contract fixture: regenerated from the production contract. It adds the
   `errorCodes.authorization` group (403 `INSUFFICIENT_SCOPE`), which `ErrorCodeInsufficientScope`
   and `AuthorizationErrorCodes` name.
+- `AuthError.HTTPStatus`: 401 or 403.
+- `RateLimitError.Raw`, the whole envelope of a 429, and the rate limit codes
+  `ErrorCodeRateLimitExceeded`, `ErrorCodeChargeVelocityExceeded` and
+  `ErrorCodeChargeDeclineRateExceeded`. The charge limits put their window and limit under
+  `error.params`.
+
+### Changed
+
+- A 403 no longer tells you to check your key id, secret and server clock. That hint is for a
+  401 only. 403 `INSUFFICIENT_SCOPE` repeats the API message, which names the missing scope.
+  403 `VERIFY_ONLY_NOT_ENABLED` (`ErrorCodeVerifyOnlyNotEnabled`) says that we switch verify-only
+  sessions on for your account. Both are still an `*AuthError`.
 
 ## 0.4.0
 

@@ -137,6 +137,13 @@ const (
 // endpoints.
 const ErrorCodeInsufficientScope = "INSUFFICIENT_SCOPE"
 
+// ErrorCodeVerifyOnlyNotEnabled (HTTP 403, CreateCheckoutSession): the
+// session asked for VerifyOnly, and verify-only sessions are not enabled for
+// your account. It arrives as an *AuthError with HTTPStatus 403. Nothing was
+// created and the idempotency key is not spent. We switch it on for your
+// account: ask Dominaite support.
+const ErrorCodeVerifyOnlyNotEnabled = "VERIFY_ONLY_NOT_ENABLED"
+
 // AuthorizationErrorCodes are the codes a correctly signed request can be
 // refused with because of what the key may do, in the gateway's own order.
 // None is retryable.
@@ -144,15 +151,25 @@ var AuthorizationErrorCodes = []string{
 	ErrorCodeInsufficientScope,
 }
 
-// AuthError means the API rejected your credentials or signature (HTTP 401/403).
-// Not retryable: fix the key id, the secret, the server clock, or the caller
+// AuthError means the API refused the request before it did anything: HTTP 401
+// or 403, on HTTPStatus. A retry with the same key and config gets the same
+// answer.
+//
+// HTTP 401: the API could not authenticate the request. ErrorCode is one of
+// INVALID_API_KEY, INVALID_SIGNATURE, TIMESTAMP_OUT_OF_RANGE or
+// IP_NOT_ALLOWED. Fix the key id, the secret, the server clock or the caller
 // allowlist.
 //
-// ErrorCode is one of INVALID_API_KEY, INVALID_SIGNATURE,
-// TIMESTAMP_OUT_OF_RANGE, IP_NOT_ALLOWED.
+// HTTP 403: the request was signed correctly, so the key id, the secret and
+// the clock are fine, but the key may not do this. ErrorCode is
+// ErrorCodeInsufficientScope (the key does not hold the scope the route
+// needs) or ErrorCodeVerifyOnlyNotEnabled (a verify-only session on an
+// account without verify-only sessions). Message says what to do.
 type AuthError struct {
 	baseError
-	ErrorCode string
+	// HTTPStatus is 401 or 403.
+	HTTPStatus int
+	ErrorCode  string
 }
 
 // RateLimitError means the API answered HTTP 429: you sent requests faster than
@@ -181,13 +198,41 @@ type AuthError struct {
 //		// reschedule with the same idempotency key
 //	}
 //
-// ErrorCode is the machine-readable code when the API named one. Empty otherwise.
+// ErrorCode is the machine-readable code when the API named one, empty
+// otherwise: ErrorCodeRateLimitExceeded for the request limits, and
+// ErrorCodeChargeVelocityExceeded or ErrorCodeChargeDeclineRateExceeded on
+// ChargePaymentMethod. Raw is the whole envelope; the charge limits put their
+// window and limit under error.params.
 type RateLimitError struct {
 	baseError
 	RetryAfterSeconds int
 	HasRetryAfter     bool
 	ErrorCode         string
+	// Raw is the whole envelope the gateway sent, for fields not modelled
+	// above. Empty when the 429 had no body.
+	Raw json.RawMessage
 }
+
+// Rate limit codes, on RateLimitError.ErrorCode. Nothing was created or
+// charged under any of them; retry with the SAME idempotency key once the
+// wait is over.
+const (
+	// ErrorCodeRateLimitExceeded: the key or the IP address sent more
+	// requests than it may. Retry-After says how long to wait. The API sends
+	// no Retry-After when it locks an address out after repeated failed
+	// sign-ins; fix the credentials before you retry.
+	ErrorCodeRateLimitExceeded = "RATE_LIMIT_EXCEEDED"
+	// ErrorCodeChargeVelocityExceeded (ChargePaymentMethod): a volume limit
+	// refused the charge before anything was placed. error.params.window and
+	// error.params.limit on Raw say which limit. A charge that keeps hitting
+	// it is a pattern to look into, not to retry around.
+	ErrorCodeChargeVelocityExceeded = "CHARGE_VELOCITY_EXCEEDED"
+	// ErrorCodeChargeDeclineRateExceeded (ChargePaymentMethod): the key
+	// collected too many declined charges in a short window, so its charge
+	// route is locked for a while. The other routes keep working. If this is
+	// a genuine billing run with many declines, contact support.
+	ErrorCodeChargeDeclineRateExceeded = "CHARGE_DECLINE_RATE_EXCEEDED"
+)
 
 // Charge error codes, in the gateway's own order: the codes ChargePaymentMethod
 // returns as a *ChargeError. CHARGE_DECLINED (HTTP 402) is deliberately not one
@@ -470,8 +515,8 @@ func newRevokeError(status int, code, message string, raw json.RawMessage) *Revo
 	return &RevokeError{baseError: baseError{Message: message}, HTTPStatus: status, ErrorCode: code, Raw: raw}
 }
 
-func newAuthError(code, message string) *AuthError {
-	return &AuthError{baseError: baseError{Message: message}, ErrorCode: code}
+func newAuthError(status int, code, message string) *AuthError {
+	return &AuthError{baseError: baseError{Message: message}, HTTPStatus: status, ErrorCode: code}
 }
 
 func newRateLimitError(message string) *RateLimitError {
