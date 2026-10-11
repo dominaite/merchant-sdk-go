@@ -3,9 +3,7 @@ package dominaite
 import (
 	"context"
 	"net/http"
-	"strconv"
 	"testing"
-	"time"
 )
 
 // Every status, retired reason, decline class and event type is a plain
@@ -99,17 +97,12 @@ func TestValuesTheSDKHasNeverSeenAreNotErrors(t *testing.T) {
 	})
 
 	t.Run("webhook event", func(t *testing.T) {
-		body := `{"id":"evt-1","type":"payout.sent","createdAt":"2026-10-11T09:00:00Z",` +
-			`"data":{"transactionId":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","status":"settled_elsewhere","declineClass":"soft_issuer_offline"}}`
-		now := time.Unix(1760173200, 0)
-		timestamp := strconv.FormatInt(now.Unix(), 10)
-		header := "t=" + timestamp + ",v1=" + signWebhook(webhookVector.Secret, timestamp, body)
-
-		event, err := VerifyWebhook([]byte(body), header, webhookVector.Secret, WithWebhookClock(func() time.Time { return now }))
+		event, err := verifySigned(t, `{"id":"evt-1","type":"payout.sent","createdAt":"2026-10-11T09:00:00Z",`+
+			`"data":{"transactionId":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","status":"settled_elsewhere","declineClass":"soft_issuer_offline"}}`)
 		if err != nil {
 			t.Fatalf("VerifyWebhook: %v", err)
 		}
-		if event.Type != "payout.sent" || event.Data.Status != "settled_elsewhere" {
+		if event.Type != "payout.sent" || event.Data.Status != "settled_elsewhere" || event.Data.DeclineClass != "soft_issuer_offline" {
 			t.Errorf("event = %+v", event)
 		}
 	})

@@ -351,6 +351,8 @@ event.Data.OriginalTransactionID  // parent, on refunds and reversals
 event.Data.IdempotencyKey    // your own mint key, when the gateway knows it
 event.Data.PSPReference      // processor reference on payment.* events; empty until known
 event.Data.StoredPaymentMethod  // *StoredPaymentMethod on payment.* events; nil when none
+event.Data.VerifyOnly        // true on every event of a verify-only session
+event.Data.DeclineClass      // on payment.failed, verification.failed and charge.*; can be empty
 event.Data.Sequence          // per-object order on agreement.* and charge.*; 0 when absent
 event.Data.Raw               // the data object, for fields not modelled above
 event.Raw                    // the verified bytes, for anything not modelled above
@@ -384,6 +386,11 @@ synchronously and on sales settled by the background sweep, the card is stored a
 approval was announced. `GetStatus` is the source of truth, so on a `SaveCard` session whose
 event has `StoredPaymentMethod == nil`, read the status to pick the card up. `charge.*` events
 carry `storedPaymentMethodId` instead (read it from `Data.Raw`).
+
+`DeclineClass` is one of `DeclineClasses` on `payment.failed`, `verification.failed`,
+`charge.failed` and `charge.retrying`. It can be empty, for example when nobody declined the
+payment. An empty class is not `hard`. `VerifyOnly` is true on every event of a verify-only
+session.
 
 ### Event catalog
 

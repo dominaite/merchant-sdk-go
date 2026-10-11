@@ -64,6 +64,9 @@
   (`CheckoutStatusAgreement`) and `Sequence`. `CheckoutSession` models `VerifyOnly` and
   `AgreementID`, and `PaymentMethodCharge` models `AgreementID` and `Sequence`. Before, these
   were readable only from `Raw`. The shared response fixture lists the new fields.
+- `WebhookData.VerifyOnly` and `WebhookData.DeclineClass`. `DeclineClass` is set on
+  `payment.failed`, `verification.failed`, `charge.failed` and `charge.retrying`, and can be
+  empty, for example when nobody declined the payment. A null or absent value reads as empty.
 - `APIError.Raw`: the whole envelope of a rejection, so `error.params` and
   `error.validationErrors` are readable.
 - `AuthError.HTTPStatus`: 401 or 403.

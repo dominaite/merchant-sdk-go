@@ -930,6 +930,16 @@ type WebhookData struct {
 	// charge.* events carry storedPaymentMethodId instead (read it from Raw).
 	StoredPaymentMethod *StoredPaymentMethod `json:"storedPaymentMethod,omitempty"`
 
+	// VerifyOnly is true on every event of a verify-only session. False (or
+	// absent on the wire) on every other event.
+	VerifyOnly bool `json:"verifyOnly"`
+	// DeclineClass is one of the DeclineClass* constants on payment.failed,
+	// verification.failed and the charge.failed and charge.retrying events.
+	// It can be empty, for example when nobody declined the payment. Empty
+	// (null or absent on the wire) on every other event. A value outside
+	// DeclineClasses is a class this SDK does not name yet, not an error.
+	DeclineClass string `json:"declineClass"`
+
 	// Sequence orders agreement.* and charge.* events for one object: it counts
 	// the announced changes of that object, only ever rises, and a redelivery
 	// carries the same number. The object is the agreement (data.id) for
