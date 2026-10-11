@@ -8,10 +8,11 @@ import (
 )
 
 // Agreement status values, in the gateway's own order. pending: created, not
-// paid yet. active: billed every period. past_due: the platform gave up on
-// the current period on this card (PastDueReason says why); it stays past_due
-// until the period is paid on another card, or until you cancel it.
-// cancelled, completed and failed are final.
+// paid yet. active: with scheduled charges on, the platform charges the card
+// each period. past_due: the platform gave up on the current period on this
+// card (PastDueReason says why); it stays past_due until the period is paid
+// on another card, or until you cancel it. cancelled, completed and failed
+// are final.
 const (
 	AgreementStatusPending   = "pending"
 	AgreementStatusActive    = "active"
