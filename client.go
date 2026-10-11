@@ -71,6 +71,11 @@ const (
 	// read and cancel one.
 	AgreementsPath = "/merchant-api/agreements"
 
+	// WebhooksPath is the canonical path of your webhook endpoints. POST
+	// registers one, GET lists them, DELETE WebhooksPath + "/{webhookId}"
+	// deletes one.
+	WebhooksPath = "/merchant-api/webhooks"
+
 	// PingPath is the credentials-and-clock smoke test. It creates nothing.
 	PingPath = "/merchant-api/ping"
 
@@ -132,6 +137,9 @@ func redactSecret(secret string) string {
 	}
 	if strings.HasPrefix(secret, "dms_") {
 		return "dms_***redacted***"
+	}
+	if strings.HasPrefix(secret, "whsec_") {
+		return "whsec_***redacted***"
 	}
 	return "***redacted***"
 }

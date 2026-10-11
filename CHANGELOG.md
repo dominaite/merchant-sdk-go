@@ -47,6 +47,11 @@
   `/merchant-api/agreements`. `Agreement` models every field the API returns, with
   `PastDueReason`, `PastDueAt` and the consent receipt. New `AgreementStatus*` and
   `PastDueReason*` constants, and error code constants for the agreement refusals.
+- Webhook endpoints: `CreateWebhookEndpoint`, `ListWebhookEndpoints` and
+  `DeleteWebhookEndpoint`, on `/merchant-api/webhooks`. They need a key with the
+  `webhooks:manage` scope. `WebhookEndpoint.Secret` is set on the first answer only; printing
+  the endpoint and JSON logging never show it. New `WebhookEndpointStatus*` constants and
+  `ErrorCodeWebhook*` codes.
 - `APIError.Raw`: the whole envelope of a rejection, so `error.params` and
   `error.validationErrors` are readable.
 - `AuthError.HTTPStatus`: 401 or 403.

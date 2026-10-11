@@ -42,8 +42,9 @@ If the key has an IP allowlist, calls from anywhere else fail with `IP_NOT_ALLOW
 allowlist is managed on the same dashboard tab.
 
 A webhook endpoint has a **third** secret, separate from the two above: `whsec_...`, shown once
-when you create the endpoint on the **Webhooks** tab. It signs deliveries to you rather than
-requests from you, so it is never sent anywhere - see [Webhooks](#webhooks).
+when you create the endpoint on the **Webhooks** tab or with `CreateWebhookEndpoint`. It signs
+deliveries to you rather than requests from you, so it is never sent anywhere - see
+[Webhooks](#webhooks).
 
 ## Quickstart (zero to a paid order)
 
@@ -482,6 +483,66 @@ Regenerating an endpoint's secret replaces it: the old secret stops verifying im
 There is no overlap window, and `VerifyWebhook` rejects a header carrying more than one `v1`
 rather than trying candidates in turn. Update the secret in your configuration as part of the
 same change that regenerates it.
+
+### Managing endpoints from code
+
+You can register endpoints on the **Webhooks** tab, or from code. The webhook endpoint routes
+need a key with the `webhooks:manage` scope. A key with the `payments` scope cannot hold it, so
+use a separate key for them.
+
+```go
+reporting, err := dominaite.New(reportingKeyID, reportingSecret)
+endpoint, err := reporting.CreateWebhookEndpoint(ctx, dominaite.CreateWebhookEndpointParams{
+	URL:            "https://shop.example/hooks/dominaite",
+	Events:         []string{dominaite.EventPaymentSucceeded, dominaite.EventPaymentRefunded},
+	IdempotencyKey: "webhook-orders-2026", // a fresh key for each new endpoint
+})
+// endpoint.Secret == "whsec_...": store it now, it is never shown again
+```
+
+`Secret` is in the first answer only. A replay of the same key, the list and every other answer
+leave it empty. Lost the secret? Delete the endpoint and create it again. Printing a
+`WebhookEndpoint` never shows the secret, but `Raw` of the first answer holds it: never log
+`Raw`.
+
+`IdempotencyKey` is required and signed. After no answer, a timeout or a 5xx, retry with the
+**same** key: the retry replaces an endpoint the lost attempt registered, and answers a new id
+and a new secret. One key never holds two endpoints. A 503 can last a while: retry for about
+five minutes, then check `ListWebhookEndpoints` and delete any endpoint you never got a secret
+for. The same key with other URL or events is refused with
+`IDEMPOTENCY_KEY_REUSED`. A key used again more than a day later, while its endpoint still
+exists, is refused with `WEBHOOK_ALREADY_REGISTERED`:
+
+```go
+var apiErr *dominaite.APIError
+if errors.As(err, &apiErr) && apiErr.ErrorCode == dominaite.ErrorCodeWebhookAlreadyRegistered {
+	var envelope struct {
+		Error struct {
+			Params struct {
+				WebhookID string `json:"webhookId"`
+			} `json:"params"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(apiErr.Raw, &envelope) // envelope.Error.Params.WebhookID is the endpoint
+}
+```
+
+`ListWebhookEndpoints` returns your endpoints, newest first, without secrets: every active
+endpoint and your newest 1000 inactive ones. `DeleteWebhookEndpoint` stops the deliveries at
+once. An id that is unknown or already deleted answers a 404 `*APIError` with `ErrorCode`
+`WEBHOOK_NOT_FOUND`: after a lost answer to a delete, treat that as done.
+
+Coded refusals are an `*APIError` with `HTTPStatus` and `ErrorCode`. Nothing was registered
+under any of them:
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `WEBHOOK_URL_REJECTED` | 400 | The URL is not https, is malformed, does not resolve, or points at a private host. |
+| `WEBHOOK_LIMIT_REACHED` | 409 | You already have the maximum of 25 active endpoints. Delete one first. |
+| `WEBHOOK_ALREADY_REGISTERED` | 409 | This key registered an endpoint more than a day ago. Use a fresh key. |
+| `WEBHOOK_NOT_FOUND` | 404 | `DeleteWebhookEndpoint`: no endpoint with this id under your account. |
+| `IDEMPOTENCY_KEY_REUSED` | 422 | The key was first used for other URL or events. |
+| `DUPLICATE_REQUEST` | 409 | A request with this key is in progress. Retry with the **same** key after a second. |
 
 ### Testing your handler
 
@@ -1040,8 +1101,9 @@ the structs do not model yet.
 ## Fields the SDK does not model yet
 
 Every request struct with a body has an `Extra` map: `CreateCheckoutSessionParams`,
-`ChargePaymentMethodParams` and `CreateRefundParams`. The SDK merges its keys into the JSON body
-and signs the result. A key in `Extra` replaces the modelled field of the same name. Use it for
+`ChargePaymentMethodParams`, `CreateRefundParams`, `CreatePlanParams`, `UpdatePlanParams`,
+`CreateAgreementParams` and `CreateWebhookEndpointParams`. The SDK merges its keys into the JSON
+body and signs the result. A key in `Extra` replaces the modelled field of the same name. Use it for
 a field the API added after this SDK version; you do not need a new SDK release for it.
 
 ```go

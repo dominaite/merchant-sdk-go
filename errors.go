@@ -215,6 +215,30 @@ const (
 	ErrorCodeMaxAmountBelowPlanAmount = "MAX_AMOUNT_BELOW_PLAN_AMOUNT"
 )
 
+// Codes of the webhook endpoint routes. They arrive on APIError.ErrorCode,
+// with the status on APIError.HTTPStatus. ErrorCodeIdempotencyKeyReused (422:
+// the key was first used for a different URL or events) and
+// ErrorCodeDuplicateRequest (409: a request with this key is in progress;
+// retry with the same key after a second) arrive there too. Nothing was
+// registered under any of them.
+const (
+	// ErrorCodeWebhookURLRejected (400): the URL is not https, is malformed,
+	// does not resolve, or points at a private, loopback or link-local host.
+	// The message says which.
+	ErrorCodeWebhookURLRejected = "WEBHOOK_URL_REJECTED"
+	// ErrorCodeWebhookLimitReached (409): you already have the maximum of 25
+	// active endpoints. Delete one first.
+	ErrorCodeWebhookLimitReached = "WEBHOOK_LIMIT_REACHED"
+	// ErrorCodeWebhookAlreadyRegistered (409): this key registered an endpoint
+	// more than a day ago, and that endpoint still exists. Its id is at
+	// error.params.webhookId in APIError.Raw. Use a fresh key for a new
+	// endpoint.
+	ErrorCodeWebhookAlreadyRegistered = "WEBHOOK_ALREADY_REGISTERED"
+	// ErrorCodeWebhookNotFound (404, DeleteWebhookEndpoint): no endpoint with
+	// this id under your account. After a lost answer, treat it as done.
+	ErrorCodeWebhookNotFound = "WEBHOOK_NOT_FOUND"
+)
+
 // ErrorCodeInsufficientScope (HTTP 403, on every route that needs a scope):
 // the request was signed correctly, but the API key does not hold the scope
 // the route needs. It arrives as an *AuthError with HTTPStatus 403. A key's
