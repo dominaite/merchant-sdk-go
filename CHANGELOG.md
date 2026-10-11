@@ -34,6 +34,9 @@
 - `Extra` on `ChargePaymentMethodParams` and `CreateRefundParams`, as on
   `CreateCheckoutSessionParams`: extra body fields, merged in and signed. A key in `Extra` replaces
   the modelled field of the same name.
+- `GetIntegrationContract`: reads the API's machine-readable contract
+  (GET `/merchant-api/integration/contract`). The route is public, so it needs no scope.
+  `Version`, `Statuses` and `WebhookEventCatalog` are typed; the rest is on `Raw`.
 - `AuthError.HTTPStatus`: 401 or 403.
 - `RateLimitError.Raw`, the whole envelope of a 429, and the rate limit codes
   `ErrorCodeRateLimitExceeded`, `ErrorCodeChargeVelocityExceeded` and

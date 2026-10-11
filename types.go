@@ -249,6 +249,21 @@ type Ping struct {
 	Raw json.RawMessage `json:"-"`
 }
 
+// IntegrationContract is what GetIntegrationContract returns: the API's own
+// description of its routes, fields, codes and vocabularies.
+type IntegrationContract struct {
+	// Version is the dated version of the contract, e.g. "2026-09-16".
+	Version string `json:"version"`
+	// Statuses is the transaction status vocabulary, in the gateway's order.
+	Statuses []string `json:"statuses"`
+	// WebhookEventCatalog is the payment.* webhook event types. The recurring
+	// and verification event types are in their own sections of Raw.
+	WebhookEventCatalog []string `json:"webhookEventCatalog"`
+
+	// Raw is the whole contract as the API sent it.
+	Raw json.RawMessage `json:"-"`
+}
+
 // Transaction status values returned by GetStatus.
 const (
 	StatusPending           = "pending"

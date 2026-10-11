@@ -1012,6 +1012,20 @@ endless - once the platform has independently closed the attempt (about an hour 
 the replay answers `PRIOR_ATTEMPT_FAILED` and the key is spent; reconcile through `GetStatus`
 and use a fresh key.
 
+## Reading the API contract
+
+`GetIntegrationContract` reads the API's machine-readable contract: its routes, fields, error
+codes and vocabularies, as the API serves them now. The route is public, so it needs no scope.
+`Version`, `Statuses` and `WebhookEventCatalog` are typed; everything else is on `Raw`.
+
+```go
+contract, err := client.GetIntegrationContract(ctx)
+if err != nil {
+	return err
+}
+log.Printf("contract version %s", contract.Version) // e.g. 2026-09-16
+```
+
 ## Verifying your signing
 
 Run `go test ./...` before you touch the live API. The SDK signs for you, but the recipe is

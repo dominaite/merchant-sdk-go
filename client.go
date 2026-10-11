@@ -63,6 +63,10 @@ const (
 	// PingPath is the credentials-and-clock smoke test. It creates nothing.
 	PingPath = "/merchant-api/ping"
 
+	// IntegrationContractPath is the API's machine-readable contract. GET
+	// reads it. The route is public, so it needs no scope.
+	IntegrationContractPath = "/merchant-api/integration/contract"
+
 	// Version is this SDK's version, reported in the User-Agent.
 	Version = "0.4.0"
 
@@ -275,6 +279,30 @@ func (c *Client) Ping(ctx context.Context) (*Ping, error) {
 	}
 
 	return ping, nil
+}
+
+// GetIntegrationContract reads the API's machine-readable contract: its
+// routes, request and response fields, error codes and vocabularies, as the
+// API serves them now. The route is public, so it needs no scope; the SDK
+// signs the call anyway, like every call. Use it to check what the API
+// supports, for example a field this SDK does not model yet. Version and the
+// vocabularies are typed; everything else is on Raw.
+//
+// Errors it returns: as Ping.
+func (c *Client) GetIntegrationContract(ctx context.Context) (*IntegrationContract, error) {
+	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
+	// Idempotency-Key header.
+	payload, err := c.request(ctx, http.MethodGet, IntegrationContractPath, "", "")
+	if err != nil {
+		return nil, err
+	}
+
+	contract := &IntegrationContract{Raw: payload}
+	if err := json.Unmarshal(payload, contract); err != nil || contract.Version == "" {
+		return nil, newAPIError(http.StatusOK, "The API returned an unexpected contract response")
+	}
+
+	return contract, nil
 }
 
 // CreateCheckoutSession opens a hosted checkout session for one payment. With
