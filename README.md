@@ -50,18 +50,23 @@ deliveries to you rather than requests from you, so it is never sent anywhere - 
 
 Every key with the `payments` scope (a payments key) can create sessions, save and revoke cards,
 read statuses, refund, and manage plans and agreements. The features below need a step from us
-first. The dashboard has no switch for them, so ask us: contact Dominaite support.
+first, so ask us: contact Dominaite support. The dashboard has no switch for the first four.
 
-- **[Saved-card charges](#stored-payment-methods-recurring).** We switch `ChargePaymentMethod` on
-  per account. Without it, the API answers 503 `PAYMENT_METHOD_CHARGES_DISABLED`.
-- **[Subscription sessions and scheduled charges](#subscriptions-plans-and-agreements).** We
-  switch on the session with `AgreementID`, and the scheduled charges. Without it, the session is
-  refused with `SUBSCRIPTIONS_NOT_ENABLED`, and no scheduled charge runs.
-- **[Card verification](#verify-only-sessions).** We switch on the session with `VerifyOnly`.
-  Without it, the API answers 403 `VERIFY_ONLY_NOT_ENABLED`.
-- **A second key.** We issue the key that [`ListTransactions`](#listing-your-transactions-reporting)
-  and the [webhook endpoint routes](#managing-endpoints-from-code) need. With a payments key, the
-  API answers 403 `INSUFFICIENT_SCOPE` on them.
+- **[Saved-card charges](#stored-payment-methods-recurring).** Without the switch,
+  `ChargePaymentMethod` answers 503 `PAYMENT_METHOD_CHARGES_DISABLED`.
+- **[Subscription sessions](#agreements).** Without the switch, `CreateCheckoutSession` with
+  `AgreementID` answers `success: false` with `SUBSCRIPTIONS_NOT_ENABLED`.
+- **[Scheduled charges](#agreements).** Without the switch, the platform runs no scheduled charge
+  and no retry, even when the subscription session works.
+- **[Verify-only sessions](#verify-only-sessions).** Without the switch, `CreateCheckoutSession`
+  with `VerifyOnly` answers 403 `VERIFY_ONLY_NOT_ENABLED`.
+- **[Card fields](#card-fields).** We enable card fields per merchant on request.
+
+`ListTransactions` and the webhook endpoint routes need a reporting key: a second key next to your
+payments key. It holds the `transactions:read` or the `webhooks:manage` scope. A payments key
+always gets HTTP 403 `INSUFFICIENT_SCOPE` on these routes. The reporting key is for your whole
+account. It cannot be bound to a storefront. If your dashboard has no reporting key section, ask
+us for the key.
 
 ## Quickstart (zero to a paid order)
 
@@ -525,10 +530,8 @@ same change that regenerates it.
 ### Managing endpoints from code
 
 You can register endpoints on the **Webhooks** tab, or from code. The **Webhooks** tab needs no
-key. The webhook endpoint routes need a second key with the `webhooks:manage` scope. A key with
-the `payments` scope cannot hold it. These routes refuse a payments key with a 403 `*AuthError`
-with `ErrorCode` `INSUFFICIENT_SCOPE`. The dashboard cannot create the second key today, so ask
-us for it. The second key is for your whole account. It cannot be bound to a storefront.
+key. From code, the webhook endpoint routes need a
+[reporting key](#what-we-switch-on-for-your-account) with the `webhooks:manage` scope.
 
 ```go
 reporting, err := dominaite.New(reportingKeyID, reportingSecret)
@@ -751,10 +754,11 @@ the expiry, and that `ID` is what you charge and revoke with. Store it against y
 `PaymentMethod` field on the same status is something else: the string category of how the payer
 paid, `card`, `wallet` and so on. See [Status polling](#status-polling-fallback-and-the-reconciliation-sweep).)
 
-Saving a card works on every account. We switch saved-card charges (`ChargePaymentMethod`) on per
-account: ask us. Until then, a charge is refused with a 503 `*ChargeError` with `ErrorCode`
-`PAYMENT_METHOD_CHARGES_DISABLED`. A retry does not help until we switch it on. The API also
-answers this code when we pause charges for a short time. Then a later retry helps.
+Saving a card works on every account. We switch saved-card charges on per account: ask us. Until
+then, `ChargePaymentMethod` answers a 503 `*ChargeError` with `ErrorCode`
+`PAYMENT_METHOD_CHARGES_DISABLED`. It also answers this code when we pause charges for a short
+time. The code is the same in both cases. If we never switched saved-card charges on for your
+account, a retry does not help: ask us. If they are on, retry later with the same idempotency key.
 
 ```go
 key, err := dominaite.OrderIdempotencyKey("checkout-save", "sub-8817-first", 2500, "EUR")
@@ -788,8 +792,8 @@ if errors.As(err, &chargeErr) {
 		// under a new key: poll the transaction the gateway attached instead.
 		return pollUntilSettled(ctx, chargeErr.TransactionID)
 	case dominaite.ChargeErrorChargesDisabled:
-		// Nothing was charged. Charges not switched on for your account: ask us, a retry does
-		// not help. Charges paused for a short time: retry later with the SAME idempotency key.
+		// Nothing was charged. Saved-card charges never switched on for your account: a retry
+		// does not help, ask us. Switched on: retry later with the SAME idempotency key.
 	case dominaite.ChargeErrorDuplicateRequest, dominaite.ChargeErrorProcessingUnavailable:
 		// Nothing was charged; retry later with the SAME idempotency key.
 	case dominaite.ChargeErrorPaymentMethodNotActive:
@@ -891,8 +895,8 @@ refuses the other combinations with a 400.
 ## Subscriptions: plans and agreements
 
 A plan is a price and a billing interval you sell. An agreement subscribes one customer to a
-plan. The plan and agreement routes need a key with the `payments` scope. The subscription
-session and the scheduled charges need more: we switch them on for your account, so ask us first.
+plan. The plan and agreement routes need a key with the `payments` scope. We switch subscription
+sessions on for your account. Scheduled charges are a separate switch. Ask us for both.
 
 ### Plans
 
@@ -968,15 +972,16 @@ session, err := client.CreateCheckoutSession(ctx, dominaite.CreateCheckoutSessio
 ```
 
 On a plan without a trial, the session's payment is the first period. On a plan with a trial,
-the session charges the amount you send, and the first scheduled charge is due when the trial
-ends. The session saves the card whatever `SaveCard` says. A session refusal is a
-`*RefusalError` with one of the `SubscriptionSessionRefusalCodes`. Until we switch subscription
-sessions on, the code is `SUBSCRIPTIONS_NOT_ENABLED` and the agreement stays `pending`.
+the session charges the amount you send. With scheduled charges on, the first scheduled charge
+comes when the trial ends. The session saves the card whatever `SaveCard` says. A session refusal
+is a `*RefusalError` with one of the `SubscriptionSessionRefusalCodes`. Until we switch
+subscription sessions on, `CreateCheckoutSession` answers `SUBSCRIPTIONS_NOT_ENABLED`. The
+agreement then stays `pending`.
 
-After activation, scheduled charges run only after we switch them on for your account. The
-platform then charges the card every period. Follow it with the `agreement.*` and `charge.*` webhook
-events, or read the agreement with `GetAgreement`. `GetStatus` on the session's transaction
-shows the agreement as `Agreement`: its id, status and next charge. It stays `pending` after a
+With scheduled charges on, the platform charges the card each period after activation. It sends a
+`charge.*` webhook event for each of those charges. Follow the agreement with the `agreement.*`
+webhook events, or read it with `GetAgreement`. `GetStatus` on the session's transaction shows the
+agreement as `Agreement`: its `ID`, `Status` and `NextChargeAt`. `Status` stays `pending` after a
 declined or abandoned session, which means that the subscription did not start.
 
 To bill a card the customer already saved, set `StoredPaymentMethodID` on `CreateAgreement`.
@@ -1027,9 +1032,8 @@ refund, err := client.CreateRefund(ctx, transactionID, dominaite.CreateRefundPar
 // refund.RefundID == "re_...", refund.Status == dominaite.RefundStatusPending
 ```
 
-A card-present payment (made on a terminal) cannot be refunded through the API: it answers 404
-`PAYMENT_NOT_FOUND`. Whoever holds the payments key can refund up to the paid amount, so keep the
-key on your server.
+`CreateRefund` on a card-present payment (made on a terminal) answers 404 `PAYMENT_NOT_FOUND`.
+Whoever holds the payments key can refund up to the paid amount, so keep the key on your server.
 
 `IdempotencyKey` is required and signed, exactly as on a charge. Derive it from your return or
 credit-note id: the same key always answers the same refund and never refunds twice, so on a
@@ -1165,10 +1169,8 @@ the structs do not model yet.
 ## Listing your transactions (reporting)
 
 `ListTransactions` reads your card-not-present payments, one page at a time: checkout payments,
-saved-card charges, subscription charges and verify-only sessions. It needs a second key with the
-`transactions:read` scope. A key with the `payments` scope cannot hold it. The list refuses a
-payments key with a 403 `*AuthError` with `ErrorCode` `INSUFFICIENT_SCOPE`. The dashboard cannot
-create the second key today, so ask us for it.
+saved-card charges, subscription charges and verify-only sessions. It needs a
+[reporting key](#what-we-switch-on-for-your-account) with the `transactions:read` scope.
 
 ```go
 reporting, err := dominaite.New(reportingKeyID, reportingSecret)
@@ -1203,8 +1205,7 @@ for {
 - A refund is not a row of its own: it shows on its payment as `RefundedAmount` and `Status`.
 - `Type` is one of `TransactionTypes`. A `verification` row saved a card and is not a purchase,
   so leave it out of revenue.
-- The second key is for your whole account. It cannot be bound to a storefront. Fees are not part
-  of this read.
+- Fees are not part of this read.
 - The SDK signs the path only. The query string is not part of the signature.
 
 A window, status, limit or cursor that the API refuses is a 400 `*APIError` with `ErrorCode`
