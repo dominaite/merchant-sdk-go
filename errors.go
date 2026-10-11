@@ -373,8 +373,11 @@ const (
 	// exists (its DeclineClass and DeclineCode are empty), nil when the
 	// provider refused before one.
 	ChargeErrorFailed = "CHARGE_FAILED"
-	// ChargeErrorChargesDisabled (503): nothing was charged; retry later with
-	// the SAME key.
+	// ChargeErrorChargesDisabled (503): nothing was charged. The API answers
+	// it until we switch saved-card charges on for your account, and when we
+	// pause charges for a short time. The code is the same in both cases. If
+	// we never switched saved-card charges on for your account, a retry does
+	// not help: ask us. If they are on, retry later with the SAME key.
 	ChargeErrorChargesDisabled = "PAYMENT_METHOD_CHARGES_DISABLED"
 	// ChargeErrorProcessingUnavailable (503): nothing was charged; retry later
 	// with the SAME key.
