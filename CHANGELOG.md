@@ -60,6 +60,10 @@
   `EventAgreementActivated`, `EventAgreementPastDue`, `EventAgreementCancelled`,
   `EventChargeSucceeded`, `EventChargeFailed`, `EventChargeRetrying`,
   `EventVerificationSucceeded` and `EventVerificationFailed`.
+- The status read models `VerifyOnly`, `DeclineClass`, `IsRecurring`, `Agreement`
+  (`CheckoutStatusAgreement`) and `Sequence`. `CheckoutSession` models `VerifyOnly` and
+  `AgreementID`, and `PaymentMethodCharge` models `AgreementID` and `Sequence`. Before, these
+  were readable only from `Raw`. The shared response fixture lists the new fields.
 - `APIError.Raw`: the whole envelope of a rejection, so `error.params` and
   `error.validationErrors` are readable.
 - `AuthError.HTTPStatus`: 401 or 403.

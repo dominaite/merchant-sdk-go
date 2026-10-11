@@ -847,9 +847,9 @@ session, err := client.CreateCheckoutSession(ctx, dominaite.CreateCheckoutSessio
 1. The checkout places a small authorization to check the card, and saves the card.
 2. The platform releases the authorization within about 15 minutes. You and the payer are never
    charged.
-3. `GetStatus` shows the result. A non-nil `StoredPaymentMethod` says that the card is verified.
-   `Status` stays the raw status: `requires_capture`, then `cancelled` when the authorization is
-   released.
+3. `GetStatus` shows the result, with `VerifyOnly` true. A non-nil `StoredPaymentMethod` says
+   that the card is verified. `Status` stays the raw status: `requires_capture`, then
+   `cancelled` when the authorization is released.
 4. The session sends a `verification.succeeded` or `verification.failed` webhook event. It never
    sends `payment.*` events.
 
@@ -941,7 +941,9 @@ the session charges the amount you send, and the first scheduled charge comes wh
 ends. The session saves the card whatever `SaveCard` says. A session refusal is a
 `*RefusalError` with one of the `SubscriptionSessionRefusalCodes`. After activation the
 platform charges the card every period. Follow it with the `agreement.*` and `charge.*` webhook
-events, or read the agreement with `GetAgreement`.
+events, or read the agreement with `GetAgreement`. `GetStatus` on the session's transaction
+shows the agreement as `Agreement`: its id, status and next charge. It stays `pending` after a
+declined or abandoned session, which means that the subscription did not start.
 
 To bill a card the customer already saved, set `StoredPaymentMethodID` on `CreateAgreement`.
 `Consent` is then required: your own label for the wording the customer accepted, when, and from
@@ -1101,6 +1103,16 @@ is a wallet this SDK does not name yet; treat it as valid, not as an error.
 
 `requires_capture` is **not** "unpaid": the payer has already paid and the funds are held
 awaiting capture. Never treat it as an abandoned order.
+
+Five fields describe declines, saved-card charges and subscriptions:
+
+- `DeclineClass` is one of `DeclineClasses` on a failed payment. It can be empty there too,
+  when the decline is not classified yet.
+- `IsRecurring` is true for a charge on a stored card without the payer present.
+- `Agreement` is the agreement of a subscription session or charge, nil on a one-off.
+- `Sequence` orders the read against the `charge.*` events of the same transaction. It is 0 on
+  a checkout payment.
+- `VerifyOnly` is true on a verify-only session.
 
 Treat any status you do not recognise as still-open as well: a value the API adds later should
 make you keep polling, never silently close an order that is still live.

@@ -207,6 +207,13 @@ type CheckoutSession struct {
 	// characters, the same on every replay. Hand it to the payer's page with the
 	// other session values; never log it or keep it past the session.
 	ClientSecret string `json:"clientSecret,omitempty"`
+	// VerifyOnly is true on a verify-only session: Amount is the verification
+	// hold, which is released once the card is saved. False on a payment
+	// session.
+	VerifyOnly bool `json:"verifyOnly,omitempty"`
+	// AgreementID is the agr_ id of the agreement this subscription session
+	// takes the first payment for. Empty on a one-off checkout.
+	AgreementID string `json:"agreementId,omitempty"`
 
 	// Raw is the unparsed payload, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
@@ -399,9 +406,46 @@ type CheckoutStatus struct {
 	// Not to be confused with PaymentMethod, which is the string category of
 	// how the payer paid ("card", "wallet", ...).
 	StoredPaymentMethod *StoredPaymentMethod `json:"storedPaymentMethod,omitempty"`
+	// VerifyOnly is true on a verify-only session: a card check, not a
+	// payment. Status stays the raw status (requires_capture, then cancelled
+	// once the hold is released). A non-nil StoredPaymentMethod is what says
+	// the card is verified. False on every other session.
+	VerifyOnly bool `json:"verifyOnly,omitempty"`
+	// DeclineClass is one of the DeclineClass* constants on a failed payment.
+	// Empty while the payment is open, on every other status, and on a
+	// failure that is not classified yet. A value outside DeclineClasses is a
+	// class this SDK does not name yet, not an error.
+	DeclineClass string `json:"declineClass,omitempty"`
+	// IsRecurring is true for a charge on a stored card without the payer
+	// present (a recurring charge), false for a checkout payment.
+	IsRecurring bool `json:"isRecurring,omitempty"`
+	// Agreement is the agreement the session took the first payment for, or
+	// the agreement a charge was placed under. nil on a one-off checkout or
+	// charge.
+	Agreement *CheckoutStatusAgreement `json:"agreement,omitempty"`
+	// Sequence is the data.sequence of the latest charge.* event about this
+	// transaction: compare it with the events you processed. 0 on a checkout
+	// payment, which sends payment.* events only, and before the first
+	// charge.* event.
+	Sequence int64 `json:"sequence,omitempty"`
 
 	// Raw is the unparsed payload, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
+}
+
+// CheckoutStatusAgreement is the agreement on a status read: enough to know
+// whether the subscription started. Read the whole agreement with
+// GetAgreement.
+type CheckoutStatusAgreement struct {
+	// ID is the agr_ id, case-sensitive.
+	ID string `json:"id"`
+	// Status is one of the AgreementStatus* values. It stays pending after a
+	// declined or abandoned subscription session: the subscription did not
+	// start.
+	Status string `json:"status"`
+	// NextChargeAt is ISO 8601 UTC. Empty while pending and once the
+	// agreement has ended.
+	NextChargeAt string `json:"nextChargeAt,omitempty"`
 }
 
 // Stored payment method status values, in the gateway's own order.
@@ -593,6 +637,15 @@ type PaymentMethodCharge struct {
 	// TransactionID is the transaction the charge created; readable with
 	// GetStatus.
 	TransactionID string `json:"transactionId"`
+	// AgreementID is the agr_ id the charge was placed under, when the request
+	// named one. Empty otherwise.
+	AgreementID string `json:"agreementId,omitempty"`
+	// Sequence is the charge's outcome counter as of this answer: on a charge
+	// decided at once, the data.sequence of its charge.succeeded or
+	// charge.failed event. 0 while pending. A replay returns the first answer
+	// unchanged, so it can be lower than a later event's; GetStatus carries
+	// the live value.
+	Sequence int64 `json:"sequence,omitempty"`
 
 	// Raw is the unparsed charge object, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`

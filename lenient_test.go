@@ -20,6 +20,7 @@ func TestValuesTheSDKHasNeverSeenAreNotErrors(t *testing.T) {
 			"currency":      "EUR",
 			"paymentMethod": "crypto",
 			"walletType":    "future_pay",
+			"declineClass":  "soft_issuer_offline",
 			"storedPaymentMethod": map[string]any{
 				"id":            testPaymentMethodID,
 				"status":        "suspended",
@@ -30,7 +31,8 @@ func TestValuesTheSDKHasNeverSeenAreNotErrors(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetStatus: %v", err)
 		}
-		if status.Status != "held_for_review" || status.PaymentMethod != "crypto" || status.WalletType != "future_pay" {
+		if status.Status != "held_for_review" || status.PaymentMethod != "crypto" || status.WalletType != "future_pay" ||
+			status.DeclineClass != "soft_issuer_offline" {
 			t.Errorf("status = %+v", status)
 		}
 		card := status.StoredPaymentMethod
