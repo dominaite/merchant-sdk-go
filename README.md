@@ -975,8 +975,8 @@ On a plan without a trial, the session's payment is the first period. On a plan 
 the session charges the amount you send. With scheduled charges on, the first scheduled charge
 comes when the trial ends. The session saves the card whatever `SaveCard` says. A session refusal
 is a `*RefusalError` with one of the `SubscriptionSessionRefusalCodes`. Until we switch
-subscription sessions on, `CreateCheckoutSession` answers `SUBSCRIPTIONS_NOT_ENABLED`. The
-agreement then stays `pending`.
+subscription sessions on, `CreateCheckoutSession` with `AgreementID` answers
+`SUBSCRIPTIONS_NOT_ENABLED`. The agreement then stays `pending`.
 
 With scheduled charges on, the platform charges the card each period after activation. It sends a
 `charge.*` webhook event for each of those charges. Follow the agreement with the `agreement.*`
@@ -984,7 +984,8 @@ webhook events, or read it with `GetAgreement`. `GetStatus` on the session's tra
 agreement as `Agreement`: its `ID`, `Status` and `NextChargeAt`. `Status` stays `pending` after a
 declined or abandoned session, which means that the subscription did not start.
 
-To bill a card the customer already saved, set `StoredPaymentMethodID` on `CreateAgreement`.
+`CreateAgreement` also takes `StoredPaymentMethodID`, the `pm_` id of a card the customer
+already saved.
 `Consent` is then required: your own label for the wording the customer accepted, when, and from
 which IP address. A variable-amount subscription (seat plus usage) sets `MaxAmountPerPeriod`, the
 most one charge may be. It also requires `Consent`. A subscription session cannot take the first
