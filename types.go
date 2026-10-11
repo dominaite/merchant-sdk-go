@@ -412,9 +412,10 @@ type CheckoutStatus struct {
 	// the card is verified. False on every other session.
 	VerifyOnly bool `json:"verifyOnly,omitempty"`
 	// DeclineClass is one of the DeclineClass* constants on a failed payment.
-	// Empty while the payment is open, on every other status, and on a
-	// failure that is not classified yet. A value outside DeclineClasses is a
-	// class this SDK does not name yet, not an error.
+	// Empty while the payment is open and on every other status. It can be
+	// empty on a failed payment too, for example when nobody declined the
+	// payment. A value outside DeclineClasses is a class this SDK does not name
+	// yet, not an error.
 	DeclineClass string `json:"declineClass,omitempty"`
 	// IsRecurring is true for a charge on a stored card without the payer
 	// present (a recurring charge), false for a checkout payment.
@@ -623,13 +624,11 @@ type PaymentMethodCharge struct {
 	// Status is one of the ChargeStatus* constants. Treat anything you do not
 	// recognise as still open.
 	Status string `json:"status"`
-	// DeclineClass is one of the DeclineClass* constants on a failed charge,
-	// when the class is known. The 402 answer carries it only when the decline
-	// code alone decides it (soft_sca_required). For every other decline it is
-	// empty here, and the status read (GetStatus on TransactionID) carries the
-	// class a moment later. A class that stays empty means the decline came
-	// without one: do not read it as hard; if you retry, retry as for
-	// DeclineClassSoftOther. Empty on every status other than failed.
+	// DeclineClass is one of the DeclineClass* constants on a failed charge. It
+	// can be empty, for example when nobody declined the payment. An empty
+	// class is not hard: if you retry, retry as for DeclineClassSoftOther. The
+	// status read (GetStatus on TransactionID) carries the latest class. Empty
+	// on every status other than failed.
 	DeclineClass string `json:"declineClass,omitempty"`
 	// DeclineCode is the issuer's decline code, verbatim, for your logs;
 	// branch on DeclineClass instead. Empty unless the charge failed.
@@ -800,9 +799,9 @@ const (
 // EventAgreementPastDue: the platform gave up on the current period on the
 // agreement's card. Nothing cancels the agreement automatically.
 // EventChargeFailed: nothing more is tried for this charge. For a one-off
-// charge it can arrive again for the same chargeId once the decline is
-// classified; keep the latest. EventChargeRetrying: an agreement period was
-// declined softly, and the platform tries the same card again.
+// charge it can arrive again for the same chargeId with a new decline class;
+// keep the latest. EventChargeRetrying: an agreement period was declined
+// softly, and the platform tries the same card again.
 const (
 	EventAgreementActivated = "agreement.activated"
 	EventAgreementPastDue   = "agreement.past_due"

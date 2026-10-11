@@ -406,7 +406,7 @@ and refuses any other. The match is case-sensitive.
   agreement stays `past_due` until the period is paid on another card, or until you cancel it.
   Nothing cancels it automatically.
 - `charge.failed` means that nothing more is tried for this charge. For a one-off charge it can
-  arrive again for the same `chargeId` once the decline is classified: keep the latest one.
+  arrive again for the same `chargeId` with a new decline class: keep the latest one.
 - `charge.retrying` means that an agreement period was declined softly, and the platform tries
   the same card again. The agreement stays `active`.
 - A verify-only session never fires `payment.*` events. `verification.failed` fires when the
@@ -777,8 +777,7 @@ case dominaite.ChargeStatusPending:
 	// Not terminal. Poll GetStatus(charge.TransactionID), or wait for the webhook.
 case dominaite.ChargeStatusFailed:
 	// HTTP 402 from the gateway, but not an error: branch on the class, log the code.
-	// The class can be empty here: the 402 carries it only for soft_sca_required. Read
-	// GetStatus(charge.TransactionID) a moment later for the others. An empty class is not hard.
+	// An empty class is not hard: if you retry, retry as for DeclineClassSoftOther.
 	// DeclineClassHard            - give up on this card, ask the customer for another one
 	// DeclineClassSoftFunds       - insufficient funds, retry later (not in a loop)
 	// DeclineClassSoftSCARequired - the issuer wants the customer present: send them through a
@@ -807,11 +806,9 @@ returns the charge, 402 returns the charge too (`Status` `failed`), and 409,
 and, when the gateway attached the charge row, `Charge` and `TransactionID`. Only authentication
 (401/403), an id that is not yours (404, `*APIError` with `ErrorCode` `PAYMENT_METHOD_NOT_FOUND`),
 validation (400, `*APIError`), rate limiting (429) and network failures or a 5xx without a code
-keep their generic errors. `DeclineClass` and `DeclineCode` are empty unless the charge was
-declined. `DeclineClass` can be empty on a decline too: the 402 carries it only when the decline
-code alone decides it (`soft_sca_required`), and the status read carries the class of every
-other decline a moment later. An empty class is not `hard`; if you retry, retry as for
-`soft_other`.
+keep their generic errors. `DeclineClass` and `DeclineCode` are empty unless the charge failed.
+`DeclineClass` can be empty, for example when nobody declined the payment. An empty class is not
+`hard`; if you retry, retry as for `soft_other`.
 
 Set `AgreementID` to charge under an [agreement](#subscriptions-plans-and-agreements). The charge
 must then be on the agreement's terms: its payment method, its consent, its currency and its
@@ -1106,8 +1103,8 @@ awaiting capture. Never treat it as an abandoned order.
 
 Five fields describe declines, saved-card charges and subscriptions:
 
-- `DeclineClass` is one of `DeclineClasses` on a failed payment. It can be empty there too,
-  when the decline is not classified yet.
+- `DeclineClass` is one of `DeclineClasses` on a failed payment. It can be empty, for example
+  when nobody declined the payment.
 - `IsRecurring` is true for a charge on a stored card without the payer present.
 - `Agreement` is the agreement of a subscription session or charge, nil on a one-off.
 - `Sequence` orders the read against the `charge.*` events of the same transaction. It is 0 on

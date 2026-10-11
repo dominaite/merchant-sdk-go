@@ -71,8 +71,8 @@ func TestRefundExtraFieldsAreSentAndSigned(t *testing.T) {
 	assertSignedWith(t, call, http.MethodPost, PaymentsPath+"/"+testRefundTransactionID+"/refunds", testRefundKey)
 }
 
-// The 402 answer carries a decline class only when the code alone decides it.
-// A decline without one is still a result, with DeclineClass empty.
+// A decline class can be empty. A 402 without one is still a result, with
+// DeclineClass empty.
 func TestA402WithoutADeclineClassIsStillAResult(t *testing.T) {
 	server, _ := newTestServer(t, chargeEnvelope(http.StatusPaymentRequired, "CHARGE_DECLINED", "The charge was declined.", map[string]any{
 		"chargeId":      testChargeID,

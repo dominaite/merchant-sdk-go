@@ -76,9 +76,8 @@
 
 - `CreateCheckoutSession` accepts `Amount` 0 for a verify-only session. Every other session still
   refuses an amount of 0 or less before sending.
-- Docs: `PaymentMethodCharge.DeclineClass` no longer promises a class on every 402. The 402
-  carries it only for `soft_sca_required`; the status read carries the class of the other
-  declines a moment later. An empty class is not `hard`.
+- Docs: `DeclineClass` can be empty, for example when nobody declined the payment. An empty
+  class is not `hard`.
 - A 403 no longer tells you to check your key id, secret and server clock. That hint is for a
   401 only. 403 `INSUFFICIENT_SCOPE` repeats the API message, which names the missing scope.
   403 `VERIFY_ONLY_NOT_ENABLED` (`ErrorCodeVerifyOnlyNotEnabled`) says that we switch verify-only

@@ -557,8 +557,7 @@ func (c *Client) GetStatus(ctx context.Context, transactionID string) (*Checkout
 // error. The charge has Status ChargeStatusFailed, and DeclineClass, when it
 // is set, tells you whether to give up on the card (hard), wait (soft_funds,
 // soft_other) or bring the customer back for a hosted session
-// (soft_sca_required). The 402 often has no DeclineClass yet: read
-// GetStatus(charge.TransactionID) a moment later for it.
+// (soft_sca_required).
 // ChargeStatusPending is not terminal - poll GetStatus(charge.TransactionID).
 //
 // params.AgreementID charges under an agreement, on its terms.
