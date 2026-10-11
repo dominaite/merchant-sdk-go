@@ -387,9 +387,14 @@ carry `storedPaymentMethodId` instead (read it from `Data.Raw`).
 
 ### Event catalog
 
-`payment.succeeded`, `payment.failed`, `payment.requires_capture`, `payment.cancelled`,
-`payment.abandoned`, `payment.refunded`, `payment.disputed` (exported as the `Event*`
-constants). The set is closed and case-sensitive; endpoint registration rejects anything else.
+| Group | Event types |
+|---|---|
+| Payments | `payment.succeeded`, `payment.failed`, `payment.requires_capture`, `payment.cancelled`, `payment.abandoned`, `payment.refunded`, `payment.disputed` |
+| Subscriptions and saved-card charges | `agreement.activated`, `agreement.past_due`, `agreement.cancelled`, `charge.succeeded`, `charge.failed`, `charge.retrying` |
+| Verify-only sessions | `verification.succeeded`, `verification.failed` |
+
+All of them are exported as the `Event*` constants. Endpoint registration accepts these types
+and refuses any other. The match is case-sensitive.
 
 - `payment.succeeded` is the **only** signal that means money is in hand.
 - `payment.refunded` fires once per refund, from the refund row - never from the parent
@@ -397,6 +402,15 @@ constants). The set is closed and case-sensitive; endpoint registration rejects 
 - `payment.requires_capture` includes approved pre-auth holds. It is not an unpaid order.
 - `payment.cancelled` is a pre-completion void only.
 - `payment.abandoned` is the terminal sweep verdict on a checkout that was never paid.
+- `agreement.past_due` means that the platform gave up on the current period on this card. The
+  agreement stays `past_due` until the period is paid on another card, or until you cancel it.
+  Nothing cancels it automatically.
+- `charge.failed` means that nothing more is tried for this charge. For a one-off charge it can
+  arrive again for the same `chargeId` once the decline is classified: keep the latest one.
+- `charge.retrying` means that an agreement period was declined softly, and the platform tries
+  the same card again. The agreement stays `active`.
+- A verify-only session never fires `payment.*` events. `verification.failed` fires when the
+  issuer declined or the payer abandoned the checkout. No card is saved.
 
 `pending` and `processing` are deliberately not webhooked. Poll session status if you want to
 drive in-flight UX off them.

@@ -722,8 +722,11 @@ type RefundList struct {
 	Raw json.RawMessage `json:"-"`
 }
 
-// Webhook event types. This is the complete v1 catalog - endpoint registration
-// rejects anything outside it, and the match is case-sensitive.
+// Webhook event types of payments: the contract's webhookEventCatalog. With
+// the agreement, charge and verification types below, they are every type
+// that endpoint registration accepts. It refuses any other type, and the match
+// is case-sensitive. The list can grow: treat a type you do not know as a
+// no-op.
 //
 // EventPaymentSucceeded is the ONLY signal that means money is in hand. The
 // in-flight states (pending, processing) are deliberately not webhooked; poll
@@ -736,6 +739,32 @@ const (
 	EventPaymentAbandoned       = "payment.abandoned"
 	EventPaymentRefunded        = "payment.refunded"
 	EventPaymentDisputed        = "payment.disputed"
+)
+
+// Webhook event types of agreements and saved-card charges. They carry
+// Data.Sequence: order them by it, never by CreatedAt.
+//
+// EventAgreementPastDue: the platform gave up on the current period on the
+// agreement's card. Nothing cancels the agreement automatically.
+// EventChargeFailed: nothing more is tried for this charge. For a one-off
+// charge it can arrive again for the same chargeId once the decline is
+// classified; keep the latest. EventChargeRetrying: an agreement period was
+// declined softly, and the platform tries the same card again.
+const (
+	EventAgreementActivated = "agreement.activated"
+	EventAgreementPastDue   = "agreement.past_due"
+	EventAgreementCancelled = "agreement.cancelled"
+	EventChargeSucceeded    = "charge.succeeded"
+	EventChargeFailed       = "charge.failed"
+	EventChargeRetrying     = "charge.retrying"
+)
+
+// Webhook event types of verify-only sessions. A verify-only session never
+// fires payment.* events. EventVerificationFailed fires when the issuer
+// declined or the payer abandoned the checkout; no card is saved.
+const (
+	EventVerificationSucceeded = "verification.succeeded"
+	EventVerificationFailed    = "verification.failed"
 )
 
 // WebhookEvent is one verified webhook delivery. VerifyWebhook returns it; there

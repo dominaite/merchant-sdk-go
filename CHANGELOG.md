@@ -56,6 +56,10 @@
   oldest first, with `NextCursor` paging. It needs a key with the `transactions:read` scope.
   The SDK signs the path only; the query string is not part of the signature. New
   `TransactionType*` constants.
+- Event constants for the agreement, charge and verification webhooks:
+  `EventAgreementActivated`, `EventAgreementPastDue`, `EventAgreementCancelled`,
+  `EventChargeSucceeded`, `EventChargeFailed`, `EventChargeRetrying`,
+  `EventVerificationSucceeded` and `EventVerificationFailed`.
 - `APIError.Raw`: the whole envelope of a rejection, so `error.params` and
   `error.validationErrors` are readable.
 - `AuthError.HTTPStatus`: 401 or 403.
