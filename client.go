@@ -61,6 +61,11 @@ const (
 	// reads a refund back.
 	PaymentsPath = "/merchant-api/payments"
 
+	// PlansPath is the canonical path of subscription plans. POST creates a
+	// plan, GET lists them; GET, PATCH and DELETE PlansPath + "/{planId}"
+	// read, change and archive one.
+	PlansPath = "/merchant-api/plans"
+
 	// PingPath is the credentials-and-clock smoke test. It creates nothing.
 	PingPath = "/merchant-api/ping"
 

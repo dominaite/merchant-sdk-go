@@ -178,6 +178,18 @@ var SubscriptionSessionRefusalCodes = []string{
 	ErrorCodeSubscriptionsNotEnabled,
 }
 
+// Codes of the plan and agreement routes. They arrive on APIError.ErrorCode,
+// with the status on APIError.HTTPStatus. ErrorCodeIdempotencyKeyReused (422:
+// the key was first used for a different plan or agreement) arrives there
+// too. The list is additive: treat a 4xx code you do not know as not
+// retryable. A 5xx is a *TransportError: nothing was created, so retry with
+// the same key.
+const (
+	// ErrorCodePlanNotFound (404): no plan with this id under your account.
+	// The plan_ id is case-sensitive; send it exactly as it was returned.
+	ErrorCodePlanNotFound = "PLAN_NOT_FOUND"
+)
+
 // ErrorCodeInsufficientScope (HTTP 403, on every route that needs a scope):
 // the request was signed correctly, but the API key does not hold the scope
 // the route needs. It arrives as an *AuthError with HTTPStatus 403. A key's

@@ -40,6 +40,9 @@
 - `ListRefunds`: the refunds of one payment created through this API, with `RefundedAmount` and
   `RefundableAmount` (GET `/merchant-api/payments/{transactionId}/refunds`). Errors as
   `GetRefund`.
+- Plans: `CreatePlan`, `ListPlans`, `GetPlan`, `UpdatePlan` and `DeletePlan` (archives), on
+  `/merchant-api/plans`. `UpdatePlan` sends no idempotency key. Plan ids are sent exactly as
+  given. New `PlanStatus*` and `IntervalUnit*` constants, and `ErrorCodePlanNotFound`.
 - `APIError.Raw`: the whole envelope of a rejection, so `error.params` and
   `error.validationErrors` are readable.
 - `AuthError.HTTPStatus`: 401 or 403.

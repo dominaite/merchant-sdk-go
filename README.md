@@ -782,6 +782,53 @@ session, err := client.CreateCheckoutSession(ctx, dominaite.CreateCheckoutSessio
 `AgreementID` must be empty. The SDK refuses a negative amount before it sends anything. The API
 refuses the other combinations with a 400.
 
+## Subscriptions: plans and agreements
+
+A plan is a price and a billing interval you sell. An agreement subscribes one customer to a
+plan, and the platform then charges the customer every period. The plan and agreement routes
+need a key with the `payments` scope.
+
+### Plans
+
+```go
+plan, err := client.CreatePlan(ctx, dominaite.CreatePlanParams{
+	Name:           "Gold",
+	Amount:         2500, // per period, in minor units
+	Currency:       "EUR",
+	IntervalUnit:   dominaite.IntervalUnitMonth,
+	IntervalCount:  3, // every 3 months; 0 sends nothing and the API uses 1
+	TrialDays:      14,
+	CancelURL:      "https://shop.example/account/cancel",
+	IdempotencyKey: "plan-gold-quarterly", // derive it from YOUR plan record
+})
+// plan.ID == "plan_...": store it exactly as it is, it is case-sensitive
+```
+
+`IdempotencyKey` is required and signed. The same key with the same body answers the same plan
+(HTTP 200 instead of 201), so a create whose answer you lost is safe to repeat. The same key
+with a different body is refused with `IDEMPOTENCY_KEY_REUSED`.
+
+Amount, currency and interval never change. To change a price, create a new plan, archive the
+old one, and move your customers deliberately. `UpdatePlan` changes only the name, the trial
+for agreements created from now on, and the cancel page. A nil field keeps its value:
+
+```go
+name, noCancelPage := "Gold plus", ""
+plan, err = client.UpdatePlan(ctx, plan.ID, dominaite.UpdatePlanParams{
+	Name:      &name,
+	CancelURL: &noCancelPage, // "" removes the cancel page
+})
+```
+
+`UpdatePlan` sends no idempotency key: the route takes none. `DeletePlan` archives the plan: it
+accepts no new agreements, and its agreements continue unchanged. Deleting an archived plan
+succeeds again. `ListPlans` returns at most 200 plans, active first, then newest first. It has
+no pages: read a plan by id with `GetPlan`.
+
+A plan that is not yours is a 404 `*APIError` with `ErrorCode` `PLAN_NOT_FOUND`. A field the
+API refused is a 400 `*APIError`, and `Raw` carries `error.validationErrors`. A 5xx is a
+`*TransportError`: nothing was created, so retry with the same key.
+
 ## Refunds
 
 `CreateRefund` refunds a card-not-present payment of your own account, in full or in part.
