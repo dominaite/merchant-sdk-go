@@ -40,6 +40,8 @@
 - `ListRefunds`: the refunds of one payment created through this API, with `RefundedAmount` and
   `RefundableAmount` (GET `/merchant-api/payments/{transactionId}/refunds`). Errors as
   `GetRefund`.
+- `APIError.Raw`: the whole envelope of a rejection, so `error.params` and
+  `error.validationErrors` are readable.
 - `AuthError.HTTPStatus`: 401 or 403.
 - `RateLimitError.Raw`, the whole envelope of a 429, and the rate limit codes
   `ErrorCodeRateLimitExceeded`, `ErrorCodeChargeVelocityExceeded` and

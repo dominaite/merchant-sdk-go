@@ -157,3 +157,49 @@ func TestA429WithoutRetryAfterSaysSo(t *testing.T) {
 		t.Errorf("ErrorCode %q, HasRetryAfter %t", limited.ErrorCode, limited.HasRetryAfter)
 	}
 }
+
+// A rejection keeps the whole envelope, so error.params and
+// error.validationErrors stay readable without a new SDK release.
+func TestAnAPIErrorKeepsTheEnvelope(t *testing.T) {
+	rejected := gatewayError(http.StatusNotFound, "PAYMENT_NOT_FOUND", "No such payment.", map[string]any{"hint": "check the id"})
+	server, _ := newTestServer(t, rejected)
+	client := newTestClient(t, server.URL)
+
+	_, err := client.GetStatus(context.Background(), testCheckout["transactionId"].(string))
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("got %v, want *APIError", err)
+	}
+	if apiErr.HTTPStatus != http.StatusNotFound || apiErr.ErrorCode != "PAYMENT_NOT_FOUND" {
+		t.Fatalf("got HTTP %d %q", apiErr.HTTPStatus, apiErr.ErrorCode)
+	}
+	var envelope struct {
+		Error struct {
+			Params  map[string]string `json:"params"`
+			TraceID string            `json:"traceId"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(apiErr.Raw, &envelope); err != nil {
+		t.Fatalf("Raw is not the envelope: %v (%s)", err, apiErr.Raw)
+	}
+	if envelope.Error.Params["hint"] != "check the id" || envelope.Error.TraceID != "00-trace" {
+		t.Fatalf("Raw = %s", apiErr.Raw)
+	}
+}
+
+func TestAnAPIErrorWithoutAnEnvelopeHasNoRaw(t *testing.T) {
+	server := newRawServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("not found"))
+	})
+	client := newTestClient(t, server.URL)
+
+	_, err := client.GetStatus(context.Background(), testCheckout["transactionId"].(string))
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Raw != nil {
+		t.Fatalf("got %v, want *APIError with no Raw", err)
+	}
+}

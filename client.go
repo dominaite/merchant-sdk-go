@@ -1042,6 +1042,9 @@ func (r *response) rejection() error {
 	// Input rejections name a machine-readable code the same way refusals
 	// do; carry it so callers branch on the code, not on the message text.
 	apiErr.ErrorCode = firstNonEmpty(inner.ErrorCode, r.err.code())
+	if r.parsed {
+		apiErr.Raw = r.envelope
+	}
 	return apiErr
 }
 

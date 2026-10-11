@@ -521,10 +521,16 @@ type RefundError struct {
 // empty. A 409 carrying ErrorCodeStorefrontNotWhitelisted or
 // ErrorCodeStorefrontInactive, or a 400 carrying ErrorCodeStorefrontMismatch,
 // means the storefront refused the session. Empty when the API named no code.
+//
+// Raw is the whole envelope the API sent with a rejection, for fields not
+// modelled above: error.params, error.validationErrors and error.traceId. It
+// is nil when there was no JSON envelope, and on an unexpected 2xx.
 type APIError struct {
 	baseError
 	HTTPStatus int
 	ErrorCode  string
+	// Raw is the whole envelope the API sent, for fields not modelled above.
+	Raw json.RawMessage
 }
 
 // TransportError means a network-level failure, a timeout, or a 5xx. The request
