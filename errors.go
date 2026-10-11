@@ -124,6 +124,60 @@ const (
 	ErrorCodeIdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED"
 )
 
+// Subscription session refusal codes, in the gateway's own order: the
+// RefusalError.ErrorCode of a session created with AgreementID. They arrive
+// as HTTP 200 with success false, like every session refusal. Nothing was
+// created under any of them, and none changes on a retry with the same body.
+const (
+	// ErrorCodeAgreementNotFound: no agreement with this id under your
+	// account. The agr_ id is case-sensitive; send it exactly as it was
+	// returned. The agreement routes answer the same code as a 404 *APIError.
+	ErrorCodeAgreementNotFound = "AGREEMENT_NOT_FOUND"
+	// ErrorCodeAgreementNotPending: the agreement is already active,
+	// cancelled, completed or failed, so there is no first payment left to
+	// take.
+	ErrorCodeAgreementNotPending = "AGREEMENT_NOT_PENDING"
+	// ErrorCodeAgreementAmountMismatch: the amount or the currency is not the
+	// agreement's own. On a plan without a trial the session must charge
+	// exactly the agreement's amount; the currency must always match.
+	ErrorCodeAgreementAmountMismatch = "AGREEMENT_AMOUNT_MISMATCH"
+	// ErrorCodeAgreementConsentRequired: neither the session nor the
+	// agreement carries consent to a version of the platform text. Send
+	// Consent, with all three fields, on the session.
+	ErrorCodeAgreementConsentRequired = "AGREEMENT_CONSENT_REQUIRED"
+	// ErrorCodeAgreementSessionOpen: a session for this agreement is still
+	// open, and TransactionID names it. Mint a new session with a new key
+	// only after that one has expired.
+	ErrorCodeAgreementSessionOpen = "AGREEMENT_SESSION_OPEN"
+	// ErrorCodeAgreementAlreadyPaid: the session of this agreement was paid,
+	// and the agreement is still pending. Read the status of TransactionID.
+	// If the agreement stays pending, contact support with both ids. Never
+	// mint again: that would charge the customer twice.
+	ErrorCodeAgreementAlreadyPaid = "AGREEMENT_ALREADY_PAID"
+	// ErrorCodeAgreementVariableAmountUnsupported: the agreement has a
+	// MaxAmountPerPeriod, and a session can take the first payment of a
+	// fixed-amount agreement only.
+	ErrorCodeAgreementVariableAmountUnsupported = "AGREEMENT_VARIABLE_AMOUNT_UNSUPPORTED"
+	// ErrorCodeSubscriptionsNotEnabled: subscriptions are not switched on for
+	// your account yet. Plans and agreements can already be created. Contact
+	// support; do not retry on a schedule.
+	ErrorCodeSubscriptionsNotEnabled = "SUBSCRIPTIONS_NOT_ENABLED"
+)
+
+// SubscriptionSessionRefusalCodes are the refusal codes of a session created
+// with AgreementID, in the gateway's own order. Treat a code you do not know
+// as not retryable.
+var SubscriptionSessionRefusalCodes = []string{
+	ErrorCodeAgreementNotFound,
+	ErrorCodeAgreementNotPending,
+	ErrorCodeAgreementAmountMismatch,
+	ErrorCodeAgreementConsentRequired,
+	ErrorCodeAgreementSessionOpen,
+	ErrorCodeAgreementAlreadyPaid,
+	ErrorCodeAgreementVariableAmountUnsupported,
+	ErrorCodeSubscriptionsNotEnabled,
+}
+
 // ErrorCodeInsufficientScope (HTTP 403, on every route that needs a scope):
 // the request was signed correctly, but the API key does not hold the scope
 // the route needs. It arrives as an *AuthError with HTTPStatus 403. A key's

@@ -277,13 +277,17 @@ func (c *Client) Ping(ctx context.Context) (*Ping, error) {
 	return ping, nil
 }
 
-// CreateCheckoutSession opens a hosted checkout session for one payment.
+// CreateCheckoutSession opens a hosted checkout session for one payment. With
+// VerifyOnly it saves the payer's card without a payment; with AgreementID it
+// takes the first payment of a subscription.
 //
 // Errors it returns:
 //   - *ValidationError: bad arguments, including a missing IdempotencyKey;
 //     nothing was sent.
-//   - *AuthError: wrong credentials, bad signature, clock off, IP not allowlisted.
-//     Fix the config, do not retry.
+//   - *AuthError: 401 for wrong credentials, a bad signature, a clock that is
+//     off or an IP that is not allowlisted. 403 for a key without the
+//     payments scope, or VerifyOnly on an account without verify-only
+//     sessions. Fix the config, do not retry.
 //   - *RefusalError: the gateway refused the session; inspect ErrorCode.
 //   - *APIError: an unexpected or rejecting response; inspect HTTPStatus.
 //   - *RateLimitError: HTTP 429; back off and reschedule with the same
@@ -666,7 +670,16 @@ func (c *Client) GetRefund(ctx context.Context, transactionID, refundID string) 
 // prepareSessionRequest validates the params and returns the idempotency key and
 // the exact body bytes that will be both signed and sent.
 func prepareSessionRequest(params CreateCheckoutSessionParams) (string, string, error) {
-	if err := validateMoneyParams(params.Amount, params.Currency, params.OrderReference); err != nil {
+	// A verify-only session has no amount of its own: the platform sets the
+	// verification amount, so 0 is the only amount it takes.
+	if params.verifyOnly() {
+		if params.Amount < 0 {
+			return "", "", newValidationError("amount must be 0 with VerifyOnly: the platform sets the verification amount")
+		}
+		if err := validateOrderParams(params.Currency, params.OrderReference); err != nil {
+			return "", "", err
+		}
+	} else if err := validateMoneyParams(params.Amount, params.Currency, params.OrderReference); err != nil {
 		return "", "", err
 	}
 
@@ -734,6 +747,12 @@ func validateMoneyParams(amount int64, currency, orderReference string) error {
 	if amount <= 0 {
 		return newValidationError("amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR)")
 	}
+	return validateOrderParams(currency, orderReference)
+}
+
+// validateOrderParams checks currency and orderReference, which every session
+// and charge needs, a verify-only session included.
+func validateOrderParams(currency, orderReference string) error {
 	if strings.TrimSpace(currency) == "" {
 		return newValidationError("Missing required parameter: currency")
 	}

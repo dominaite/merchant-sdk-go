@@ -21,6 +21,15 @@
 - Wire contract fixture: regenerated from the production contract. It adds the
   `errorCodes.authorization` group (403 `INSUFFICIENT_SCOPE`), which `ErrorCodeInsufficientScope`
   and `AuthorizationErrorCodes` name.
+- Verify-only sessions: `CreateCheckoutSessionParams.VerifyOnly` saves the payer's card without
+  a payment. `Amount` must be 0; the platform sets the verification amount. We switch it on for
+  your account; until then the session is refused with 403 `VERIFY_ONLY_NOT_ENABLED`.
+  `Extra["verifyOnly"]` keeps working and still wins over the field.
+- Session fields: `LocationID` (the storefront), `AgreementID` (the subscription session of a
+  pending agreement) and `Consent` (`TextVersion`, `AcceptedAt`, `IP`), with
+  `ConsentTextVersionRecurring202609`.
+- `SubscriptionSessionRefusalCodes` and the `ErrorCodeAgreement*` and
+  `ErrorCodeSubscriptionsNotEnabled` constants: the refusal codes of a subscription session.
 - `AuthError.HTTPStatus`: 401 or 403.
 - `RateLimitError.Raw`, the whole envelope of a 429, and the rate limit codes
   `ErrorCodeRateLimitExceeded`, `ErrorCodeChargeVelocityExceeded` and
@@ -29,6 +38,8 @@
 
 ### Changed
 
+- `CreateCheckoutSession` accepts `Amount` 0 for a verify-only session. Every other session still
+  refuses an amount of 0 or less before sending.
 - A 403 no longer tells you to check your key id, secret and server clock. That hint is for a
   401 only. 403 `INSUFFICIENT_SCOPE` repeats the API message, which names the missing scope.
   403 `VERIFY_ONLY_NOT_ENABLED` (`ErrorCodeVerifyOnlyNotEnabled`) says that we switch verify-only

@@ -15,9 +15,12 @@ type Customer struct {
 }
 
 // CreateCheckoutSessionParams are the parameters for
-// Client.CreateCheckoutSession. Amount, Currency and OrderReference are required.
+// Client.CreateCheckoutSession. Amount, Currency and OrderReference are
+// required. With VerifyOnly, leave Amount 0.
 type CreateCheckoutSessionParams struct {
-	// Amount is in MINOR units: 2500 is 25.00 EUR. Integers only.
+	// Amount is in MINOR units: 2500 is 25.00 EUR. Integers only. It must be
+	// positive, except with VerifyOnly, where it must be 0: the platform sets
+	// the verification amount.
 	Amount int64 `json:"amount"`
 	// Currency is ISO 4217, e.g. "EUR".
 	Currency string `json:"currency"`
@@ -39,6 +42,7 @@ type CreateCheckoutSessionParams struct {
 	// The stored method shows up on CheckoutStatus.StoredPaymentMethod after the
 	// payment succeeds; a declined first payment stores nothing. The card details
 	// themselves never reach you: you get an id, a brand and the last four digits.
+	// With VerifyOnly or AgreementID the card is always saved.
 	SaveCard bool `json:"saveCard,omitempty"`
 
 	// Integration picks how the payer enters the card: IntegrationWidget (the
@@ -48,6 +52,40 @@ type CreateCheckoutSessionParams struct {
 	// the idempotency identity: replaying a key with a different Integration is
 	// IDEMPOTENCY_KEY_REUSED. Empty sends no integration field.
 	Integration Integration `json:"integration,omitempty"`
+
+	// LocationID is the id of the storefront (online location) this payment
+	// belongs to. Empty uses your default storefront, or your only active one
+	// when no default is set. An id that is not one of your storefronts is
+	// refused with a 404 *APIError. An API key bound to one storefront refuses
+	// another id with ErrorCodeStorefrontMismatch.
+	LocationID string `json:"locationId,omitempty"`
+
+	// VerifyOnly saves the payer's card without a payment. The checkout places
+	// a small authorization to check the card and saves the card. The platform
+	// releases the authorization within about 15 minutes, so nobody is
+	// charged. Leave Amount 0. SaveCard is implied, Integration must be empty
+	// or IntegrationWidget, and AgreementID must be empty.
+	//
+	// Verify-only sessions are off until we switch them on for your account.
+	// Until then the session is refused with a 403 *AuthError, ErrorCode
+	// ErrorCodeVerifyOnlyNotEnabled. The status read of a verify-only session
+	// has VerifyOnly true, and a non-nil StoredPaymentMethod says the card is
+	// verified. It fires verification.* webhook events, never payment.* ones.
+	VerifyOnly bool `json:"verifyOnly,omitempty"`
+
+	// AgreementID is the agr_ id of a PENDING agreement (CreateAgreement). It
+	// makes this the subscription session: it takes the agreement's first
+	// payment, saves the card and activates the agreement. Amount and Currency
+	// must be the agreement's own; on a plan with a trial only the currency is
+	// held. A refusal arrives as a *RefusalError with one of the
+	// SubscriptionSessionRefusalCodes.
+	AgreementID string `json:"agreementId,omitempty"`
+
+	// Consent records that the payer accepted the platform's recurring payment
+	// terms on your page. Send it with AgreementID only. Consent.TextVersion
+	// must be a version of the platform text, e.g.
+	// ConsentTextVersionRecurring202609.
+	Consent *Consent `json:"consent,omitempty"`
 
 	// IdempotencyKey is required. Derive it from the order with
 	// OrderIdempotencyKey: the same order at the same amount must produce the
@@ -74,7 +112,23 @@ func (p CreateCheckoutSessionParams) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(p.Extra) == 0 {
+	return mergeExtra(base, p.Extra)
+}
+
+// verifyOnly reports whether the body asks for a verify-only session. Extra
+// wins over the field, as it does for every key.
+func (p CreateCheckoutSessionParams) verifyOnly() bool {
+	if value, ok := p.Extra["verifyOnly"]; ok {
+		flag, isBool := value.(bool)
+		return isBool && flag
+	}
+	return p.VerifyOnly
+}
+
+// mergeExtra merges extra into an encoded JSON object. A key in extra
+// replaces the modelled field of the same name.
+func mergeExtra(base []byte, extra map[string]any) ([]byte, error) {
+	if len(extra) == 0 {
 		return base, nil
 	}
 
@@ -82,7 +136,7 @@ func (p CreateCheckoutSessionParams) MarshalJSON() ([]byte, error) {
 	if err := json.Unmarshal(base, &merged); err != nil {
 		return nil, err
 	}
-	for key, value := range p.Extra {
+	for key, value := range extra {
 		raw, err := marshalNoEscape(value)
 		if err != nil {
 			return nil, err
@@ -92,6 +146,27 @@ func (p CreateCheckoutSessionParams) MarshalJSON() ([]byte, error) {
 
 	return marshalNoEscape(merged)
 }
+
+// Consent records that your customer accepted recurring payment terms: which
+// version of the text, when, and from which IP address. Send all three
+// together.
+type Consent struct {
+	// TextVersion is the version of the consent text the customer accepted,
+	// at most 50 characters. On a subscription session it must be a version
+	// of the platform text, e.g. ConsentTextVersionRecurring202609.
+	TextVersion string `json:"textVersion,omitempty"`
+	// AcceptedAt is the ISO 8601 UTC instant the customer accepted it, e.g.
+	// "2026-10-01T09:30:00Z". Not in the future.
+	AcceptedAt string `json:"acceptedAt,omitempty"`
+	// IP is the IPv4 or IPv6 address the customer accepted it from.
+	IP string `json:"ip,omitempty"`
+}
+
+// ConsentTextVersionRecurring202609 is the version of the platform's recurring
+// payment consent text that the subscription session accepts. Show this
+// version's text on your page. Older versions stay accepted for agreements that
+// were shown them.
+const ConsentTextVersionRecurring202609 = "recurring-2026-09"
 
 // marshalNoEscape encodes without Go's default HTML escaping, so an ampersand in
 // a customer name stays an ampersand. The signature covers the exact bytes we

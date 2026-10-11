@@ -519,7 +519,8 @@ and cancelling the context returns a `*TransportError` wrapping `context.Cancele
 
 `Amount` is always an integer in the currency's minor unit: `2500` is 25.00 EUR. The field is an
 `int64`, so a float will not compile; non-positive values are rejected before anything reaches
-the network. The amount is locked server-side - what you pass here is what gets charged; nothing
+the network. The one exception is a [verify-only session](#verify-only-sessions), whose amount
+is 0. The amount is locked server-side - what you pass here is what gets charged; nothing
 in the browser can change it.
 
 Prices usually live as decimals in your catalog. Convert them with `ToMinorUnits`, which does it
@@ -738,6 +739,38 @@ Revoking signs an empty key and an empty body, like `GetStatus`. A revoke that f
 `StoredPaymentMethod` with `Status` `revoked`, and a charge against it is refused with
 `PAYMENT_METHOD_NOT_ACTIVE`. An id that is not yours is an `*APIError` with `HTTPStatus` 404.
 
+## Verify-only sessions
+
+A verify-only session saves the payer's card without a payment. Use it to put a card on file
+before the first charge, for example at sign-up.
+
+Verify-only sessions are off by default. We switch it on for your account. Until then, a
+verify-only session is refused with a 403 `*AuthError` with `ErrorCode`
+`VERIFY_ONLY_NOT_ENABLED`. Nothing is created, and the idempotency key is not spent.
+
+```go
+session, err := client.CreateCheckoutSession(ctx, dominaite.CreateCheckoutSessionParams{
+	// Amount stays 0: the platform sets the verification amount.
+	Currency:       "EUR",
+	OrderReference: "card-check-customer-8817",
+	VerifyOnly:     true,
+	IdempotencyKey: "verify-customer-8817", // derive it from the customer, never per call
+})
+```
+
+1. The checkout places a small authorization to check the card, and saves the card.
+2. The platform releases the authorization within about 15 minutes. You and the payer are never
+   charged.
+3. `GetStatus` shows the result. A non-nil `StoredPaymentMethod` says that the card is verified.
+   `Status` stays the raw status: `requires_capture`, then `cancelled` when the authorization is
+   released.
+4. The session sends a `verification.succeeded` or `verification.failed` webhook event. It never
+   sends `payment.*` events.
+
+`Amount` must be 0. `SaveCard` is implied. `Integration` must be empty or `IntegrationWidget`, and
+`AgreementID` must be empty. The SDK refuses a negative amount before it sends anything. The API
+refuses the other combinations with a 400.
+
 ## Refunds
 
 `CreateRefund` refunds a card-not-present payment of your own account, in full or in part.
@@ -883,7 +916,7 @@ For the specific kind, use `errors.As` with the concrete pointer type:
 | `*RateLimitError` | 429. `ErrorCode` is `RATE_LIMIT_EXCEEDED`, or on a charge `CHARGE_VELOCITY_EXCEEDED` or `CHARGE_DECLINE_RATE_EXCEEDED`. `RetryAfterSeconds` carries the `Retry-After` header when the API sent one as integer seconds; `HasRetryAfter` tells "wait 0s" apart from "the API did not say". `Raw` is the whole envelope. | Back off, then reschedule with the **same** idempotency key. The SDK never retries this for you. |
 | `*TransportError` | Network failure, timeout, or a 5xx without a code the SDK models. Wraps the cause, reachable with `errors.Unwrap`. A 5xx classifies on the status, so an HTML or empty error page from an overloaded edge is still retryable. | Retry with the **same** idempotency key. |
 | `*APIError` | Any other rejecting or unexpected response; `HTTPStatus` and `ErrorCode` carry the details. | Inspect. A storefront refusal lands here (see [Storefront errors](#storefront-errors)). A 3xx means a proxy or a wrong base URL answered with a redirect - the SDK never follows one. A replayed idempotency key does not land here; it comes back as a `*RefusalError`. |
-| `*ValidationError` | Bad arguments (non-positive amount, missing field or idempotency key, malformed key id). | Fix the call; nothing was sent. |
+| `*ValidationError` | Bad arguments (non-positive amount outside a verify-only session, missing field or idempotency key, malformed key id). | Fix the call; nothing was sent. |
 | `*WebhookVerificationError` | `VerifyWebhook` rejected an inbound delivery; `Reason` carries which check failed. | Answer 400 with no detail. See [Webhooks](#rejections). |
 
 Refusal codes on `RefusalError.ErrorCode`, exported as `ErrorCode*` constants:
