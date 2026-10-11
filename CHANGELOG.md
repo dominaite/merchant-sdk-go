@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 ### Added
 
@@ -18,6 +18,73 @@
   on `payment.*` events. Empty when null or absent. Refund and cancel events carry the original
   payment's `OrderReference`. The README lists every identification field a `payment.*` event
   carries.
+- Wire contract fixture: regenerated from the production contract. It adds the
+  `errorCodes.authorization` group (403 `INSUFFICIENT_SCOPE`), which `ErrorCodeInsufficientScope`
+  and `AuthorizationErrorCodes` name.
+- Verify-only sessions: `CreateCheckoutSessionParams.VerifyOnly` saves the payer's card without
+  a payment. `Amount` must be 0; the platform sets the verification amount. We switch it on for
+  your account; until then the session is refused with 403 `VERIFY_ONLY_NOT_ENABLED`.
+  `Extra["verifyOnly"]` keeps working and still wins over the field.
+- Session fields: `LocationID` (the storefront), `AgreementID` (the subscription session of a
+  pending agreement) and `Consent` (`TextVersion`, `AcceptedAt`, `IP`), with
+  `ConsentTextVersionRecurring202609`.
+- `SubscriptionSessionRefusalCodes` and the `ErrorCodeAgreement*` and
+  `ErrorCodeSubscriptionsNotEnabled` constants: the refusal codes of a subscription session.
+- `ChargePaymentMethodParams.AgreementID`: charge under an agreement, on its terms.
+- `Extra` on `ChargePaymentMethodParams` and `CreateRefundParams`, as on
+  `CreateCheckoutSessionParams`: extra body fields, merged in and signed. A key in `Extra` replaces
+  the modelled field of the same name.
+- `GetIntegrationContract`: reads the API's machine-readable contract
+  (GET `/merchant-api/integration/contract`). The route is public, so it needs no scope.
+  `Version`, `Statuses` and `WebhookEventCatalog` are typed; the rest is on `Raw`.
+- `ListRefunds`: the refunds of one payment created through this API, with `RefundedAmount` and
+  `RefundableAmount` (GET `/merchant-api/payments/{transactionId}/refunds`). Errors as
+  `GetRefund`.
+- Plans: `CreatePlan`, `ListPlans`, `GetPlan`, `UpdatePlan` and `DeletePlan` (archives), on
+  `/merchant-api/plans`. `UpdatePlan` sends no idempotency key. Plan ids are sent exactly as
+  given. New `PlanStatus*` and `IntervalUnit*` constants, and `ErrorCodePlanNotFound`.
+- Agreements: `CreateAgreement`, `GetAgreement` and `CancelAgreement`, on
+  `/merchant-api/agreements`. `Agreement` models every field the API returns, with
+  `PastDueReason`, `PastDueAt` and the consent receipt. New `AgreementStatus*` and
+  `PastDueReason*` constants, and error code constants for the agreement refusals.
+- Webhook endpoints: `CreateWebhookEndpoint`, `ListWebhookEndpoints` and
+  `DeleteWebhookEndpoint`, on `/merchant-api/webhooks`. They need a key with the
+  `webhooks:manage` scope. `WebhookEndpoint.Secret` is set on the first answer only; printing
+  the endpoint and JSON logging never show it. New `WebhookEndpointStatus*` constants and
+  `ErrorCodeWebhook*` codes.
+- `ListTransactions`: one page of your card-not-present payments in a [from, to) window,
+  oldest first, with `NextCursor` paging. It needs a key with the `transactions:read` scope.
+  The SDK signs the path only; the query string is not part of the signature. New
+  `TransactionType*` constants.
+- Event constants for the agreement, charge and verification webhooks:
+  `EventAgreementActivated`, `EventAgreementPastDue`, `EventAgreementCancelled`,
+  `EventChargeSucceeded`, `EventChargeFailed`, `EventChargeRetrying`,
+  `EventVerificationSucceeded` and `EventVerificationFailed`.
+- The status read models `VerifyOnly`, `DeclineClass`, `IsRecurring`, `Agreement`
+  (`CheckoutStatusAgreement`) and `Sequence`. `CheckoutSession` models `VerifyOnly` and
+  `AgreementID`, and `PaymentMethodCharge` models `AgreementID` and `Sequence`. Before, these
+  were readable only from `Raw`. The shared response fixture lists the new fields.
+- `WebhookData.VerifyOnly` and `WebhookData.DeclineClass`. `DeclineClass` is set on
+  `payment.failed`, `verification.failed`, `charge.failed` and `charge.retrying`, and can be
+  empty, for example when nobody declined the payment. A null or absent value reads as empty.
+- `APIError.Raw`: the whole envelope of a rejection, so `error.params` and
+  `error.validationErrors` are readable.
+- `AuthError.HTTPStatus`: 401 or 403.
+- `RateLimitError.Raw`, the whole envelope of a 429, and the rate limit codes
+  `ErrorCodeRateLimitExceeded`, `ErrorCodeChargeVelocityExceeded` and
+  `ErrorCodeChargeDeclineRateExceeded`. The charge limits put their window and limit under
+  `error.params`.
+
+### Changed
+
+- `CreateCheckoutSession` accepts `Amount` 0 for a verify-only session. Every other session still
+  refuses an amount of 0 or less before sending.
+- Docs: `DeclineClass` can be empty, for example when nobody declined the payment. An empty
+  class is not `hard`.
+- A 403 no longer tells you to check your key id, secret and server clock. That hint is for a
+  401 only. 403 `INSUFFICIENT_SCOPE` repeats the API message, which names the missing scope.
+  403 `VERIFY_ONLY_NOT_ENABLED` (`ErrorCodeVerifyOnlyNotEnabled`) says that we switch verify-only
+  sessions on for your account. Both are still an `*AuthError`.
 
 ## 0.4.0
 

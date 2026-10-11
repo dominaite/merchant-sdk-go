@@ -56,15 +56,39 @@ const (
 	PaymentMethodsPath = "/merchant-api/payment-methods"
 
 	// PaymentsPath is the canonical path of payments. POST PaymentsPath +
-	// "/{transactionId}/refunds" refunds one; GET PaymentsPath +
-	// "/{transactionId}/refunds/{refundId}" reads a refund back.
+	// "/{transactionId}/refunds" refunds one, GET on the same path lists its
+	// refunds, and GET PaymentsPath + "/{transactionId}/refunds/{refundId}"
+	// reads a refund back.
 	PaymentsPath = "/merchant-api/payments"
+
+	// PlansPath is the canonical path of subscription plans. POST creates a
+	// plan, GET lists them; GET, PATCH and DELETE PlansPath + "/{planId}"
+	// read, change and archive one.
+	PlansPath = "/merchant-api/plans"
+
+	// AgreementsPath is the canonical path of subscription agreements. POST
+	// creates an agreement; GET and DELETE AgreementsPath + "/{agreementId}"
+	// read and cancel one.
+	AgreementsPath = "/merchant-api/agreements"
+
+	// WebhooksPath is the canonical path of your webhook endpoints. POST
+	// registers one, GET lists them, DELETE WebhooksPath + "/{webhookId}"
+	// deletes one.
+	WebhooksPath = "/merchant-api/webhooks"
+
+	// TransactionsPath is the canonical path of your transaction list. GET
+	// reads one page. The query string is never part of the signature.
+	TransactionsPath = "/merchant-api/transactions"
 
 	// PingPath is the credentials-and-clock smoke test. It creates nothing.
 	PingPath = "/merchant-api/ping"
 
+	// IntegrationContractPath is the API's machine-readable contract. GET
+	// reads it. The route is public, so it needs no scope.
+	IntegrationContractPath = "/merchant-api/integration/contract"
+
 	// Version is this SDK's version, reported in the User-Agent.
-	Version = "0.4.0"
+	Version = "0.5.0"
 
 	defaultTimeout = 45 * time.Second // serverless cold starts hit 10+s on dev; 15s was a coin flip
 
@@ -117,6 +141,9 @@ func redactSecret(secret string) string {
 	}
 	if strings.HasPrefix(secret, "dms_") {
 		return "dms_***redacted***"
+	}
+	if strings.HasPrefix(secret, "whsec_") {
+		return "whsec_***redacted***"
 	}
 	return "***redacted***"
 }
@@ -277,13 +304,41 @@ func (c *Client) Ping(ctx context.Context) (*Ping, error) {
 	return ping, nil
 }
 
-// CreateCheckoutSession opens a hosted checkout session for one payment.
+// GetIntegrationContract reads the API's machine-readable contract: its
+// routes, request and response fields, error codes and vocabularies, as the
+// API serves them now. The route is public, so it needs no scope; the SDK
+// signs the call anyway, like every call. Use it to check what the API
+// supports, for example a field this SDK does not model yet. Version and the
+// vocabularies are typed; everything else is on Raw.
+//
+// Errors it returns: as Ping.
+func (c *Client) GetIntegrationContract(ctx context.Context) (*IntegrationContract, error) {
+	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
+	// Idempotency-Key header.
+	payload, err := c.request(ctx, http.MethodGet, IntegrationContractPath, "", "")
+	if err != nil {
+		return nil, err
+	}
+
+	contract := &IntegrationContract{Raw: payload}
+	if err := json.Unmarshal(payload, contract); err != nil || contract.Version == "" {
+		return nil, newAPIError(http.StatusOK, "The API returned an unexpected contract response")
+	}
+
+	return contract, nil
+}
+
+// CreateCheckoutSession opens a hosted checkout session for one payment. With
+// VerifyOnly it saves the payer's card without a payment; with AgreementID it
+// takes the first payment of a subscription.
 //
 // Errors it returns:
 //   - *ValidationError: bad arguments, including a missing IdempotencyKey;
 //     nothing was sent.
-//   - *AuthError: wrong credentials, bad signature, clock off, IP not allowlisted.
-//     Fix the config, do not retry.
+//   - *AuthError: 401 for wrong credentials, a bad signature, a clock that is
+//     off or an IP that is not allowlisted. 403 for a key without the
+//     payments scope, or VerifyOnly on an account without verify-only
+//     sessions. Fix the config, do not retry.
 //   - *RefusalError: the gateway refused the session; inspect ErrorCode.
 //   - *APIError: an unexpected or rejecting response; inspect HTTPStatus.
 //   - *RateLimitError: HTTP 429; back off and reschedule with the same
@@ -499,10 +554,13 @@ func (c *Client) GetStatus(ctx context.Context, transactionID string) (*Checkout
 // The HTTP status is the contract on this route. 201 (200 on a replay) returns
 // the charge, Status ChargeStatusSucceeded, ChargeStatusPending or
 // ChargeStatusCancelled. 402 returns the charge too: a decline is not an
-// error, the charge has Status ChargeStatusFailed plus a DeclineClass telling
-// you whether to give up on the card (hard), wait (soft_funds, soft_other) or
-// bring the customer back for a hosted session (soft_sca_required).
+// error. The charge has Status ChargeStatusFailed, and DeclineClass, when it
+// is set, tells you whether to give up on the card (hard), wait (soft_funds,
+// soft_other) or bring the customer back for a hosted session
+// (soft_sca_required).
 // ChargeStatusPending is not terminal - poll GetStatus(charge.TransactionID).
+//
+// params.AgreementID charges under an agreement, on its terms.
 //
 // Errors it returns:
 //   - *ValidationError: bad arguments; nothing was sent.
@@ -536,8 +594,8 @@ func (c *Client) ChargePaymentMethod(ctx context.Context, paymentMethodID string
 
 	// 201 (200 on a durable replay): the charge was placed, whatever its
 	// status. 402: the provider declined; the envelope says success=false but
-	// the charge is right there, Status failed with its decline class, so it
-	// is a result, not an error.
+	// the charge is right there with Status failed, so it is a result, not an
+	// error.
 	if charge != nil && (reply.success() || reply.status == http.StatusPaymentRequired) {
 		return charge, nil
 	}
@@ -663,10 +721,94 @@ func (c *Client) GetRefund(ctx context.Context, transactionID, refundID string) 
 	return reply.refund()
 }
 
+// ListRefunds lists the refunds of one payment that were created through this
+// API: pending first, then processing, then succeeded and failed, newest
+// first within each group. Each refund has the fields GetRefund returns. A
+// refund made in the dashboard or at the provider is not in the list, but
+// RefundedAmount counts it. A new refund shows up once it is picked up, the
+// same moment GetRefund stops answering REFUND_NOT_FOUND.
+//
+// RefundableAmount is what a new refund could take right now, so read it
+// before a partial refund to size it.
+//
+// Errors it returns: as GetRefund. An unknown payment is a *RefundError with
+// ErrorCode RefundErrorPaymentNotFound.
+func (c *Client) ListRefunds(ctx context.Context, transactionID string) (*RefundList, error) {
+	id, err := normalizeTransactionID(transactionID)
+	if err != nil {
+		return nil, err
+	}
+
+	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
+	// Idempotency-Key header.
+	reply, err := c.send(ctx, http.MethodGet, PaymentsPath+"/"+id+"/refunds", "", "")
+	if err != nil {
+		return nil, err
+	}
+	if reply.status >= 400 {
+		return nil, reply.refundRejection()
+	}
+	if !reply.parsed || !isJSONObject(reply.data) {
+		return nil, newAPIError(reply.status, "The API answered the refund list without a refund list body")
+	}
+
+	var wire struct {
+		TransactionID    string          `json:"transactionId"`
+		Currency         string          `json:"currency"`
+		RefundedAmount   int64           `json:"refundedAmount"`
+		RefundableAmount int64           `json:"refundableAmount"`
+		Refunds          json.RawMessage `json:"refunds"`
+	}
+	if json.Unmarshal(reply.data, &wire) != nil || wire.TransactionID == "" {
+		return nil, newAPIError(reply.status, "The API returned an unexpected refund list")
+	}
+	refunds, err := decodeItems(wire.Refunds, func(refund *Refund, raw json.RawMessage) { refund.Raw = raw })
+	if err != nil {
+		return nil, newAPIError(reply.status, "The API returned an unexpected refund in the refund list")
+	}
+
+	return &RefundList{
+		TransactionID:    wire.TransactionID,
+		Currency:         wire.Currency,
+		RefundedAmount:   wire.RefundedAmount,
+		RefundableAmount: wire.RefundableAmount,
+		Refunds:          refunds,
+		Raw:              reply.data,
+	}, nil
+}
+
+// decodeItems decodes a JSON array one element at a time, so every item keeps
+// its own bytes on its Raw field. null and an absent array decode as empty.
+func decodeItems[T any](raw json.RawMessage, keepRaw func(*T, json.RawMessage)) ([]T, error) {
+	var elements []json.RawMessage
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &elements); err != nil {
+			return nil, err
+		}
+	}
+	items := make([]T, len(elements))
+	for i, element := range elements {
+		if err := json.Unmarshal(element, &items[i]); err != nil {
+			return nil, err
+		}
+		keepRaw(&items[i], element)
+	}
+	return items, nil
+}
+
 // prepareSessionRequest validates the params and returns the idempotency key and
 // the exact body bytes that will be both signed and sent.
 func prepareSessionRequest(params CreateCheckoutSessionParams) (string, string, error) {
-	if err := validateMoneyParams(params.Amount, params.Currency, params.OrderReference); err != nil {
+	// A verify-only session has no amount of its own: the platform sets the
+	// verification amount, so 0 is the only amount it takes.
+	if params.verifyOnly() {
+		if params.Amount < 0 {
+			return "", "", newValidationError("amount must be 0 with VerifyOnly: the platform sets the verification amount")
+		}
+		if err := validateOrderParams(params.Currency, params.OrderReference); err != nil {
+			return "", "", err
+		}
+	} else if err := validateMoneyParams(params.Amount, params.Currency, params.OrderReference); err != nil {
 		return "", "", err
 	}
 
@@ -734,6 +876,12 @@ func validateMoneyParams(amount int64, currency, orderReference string) error {
 	if amount <= 0 {
 		return newValidationError("amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR)")
 	}
+	return validateOrderParams(currency, orderReference)
+}
+
+// validateOrderParams checks currency and orderReference, which every session
+// and charge needs, a verify-only session included.
+func validateOrderParams(currency, orderReference string) error {
 	if strings.TrimSpace(currency) == "" {
 		return newValidationError("Missing required parameter: currency")
 	}
@@ -873,11 +1021,7 @@ func (r *response) charge() *PaymentMethodCharge {
 // a coded 4xx, and the generic errors for the rest (5xx is a *TransportError).
 func (r *response) refund() (*Refund, error) {
 	if r.status >= 400 {
-		code := r.err.code()
-		if code != "" && r.status < 500 {
-			return nil, newRefundError(r.status, code, firstNonEmpty(r.err.message(), "The refund was refused."), r.envelope)
-		}
-		return nil, r.rejection()
+		return nil, r.refundRejection()
 	}
 	if !r.parsed || !isJSONObject(r.data) {
 		return nil, newAPIError(r.status, "The API answered the refund without a refund body")
@@ -887,6 +1031,16 @@ func (r *response) refund() (*Refund, error) {
 		return nil, newAPIError(r.status, "The API returned an unexpected refund object")
 	}
 	return refund, nil
+}
+
+// refundRejection reads a failed refund route's reply: a *RefundError for a
+// coded 4xx, the generic errors for the rest (5xx is a *TransportError).
+func (r *response) refundRejection() error {
+	code := r.err.code()
+	if code != "" && r.status < 500 {
+		return newRefundError(r.status, code, firstNonEmpty(r.err.message(), "The refund was refused."), r.envelope)
+	}
+	return r.rejection()
 }
 
 // rejection is the generic reading of a failed reply: 5xx is the API being
@@ -909,6 +1063,9 @@ func (r *response) rejection() error {
 	// Input rejections name a machine-readable code the same way refusals
 	// do; carry it so callers branch on the code, not on the message text.
 	apiErr.ErrorCode = firstNonEmpty(inner.ErrorCode, r.err.code())
+	if r.parsed {
+		apiErr.Raw = r.envelope
+	}
 	return apiErr
 }
 
@@ -930,6 +1087,12 @@ func isGenericFailureStatus(status int) bool {
 // for the route to read, because the payment-method routes answer 402, 409,
 // 422, 502 and 503 with a body the caller needs.
 func (c *Client) send(ctx context.Context, method, path, body, idempotencyKey string) (*response, error) {
+	return c.sendQuery(ctx, method, path, "", body, idempotencyKey)
+}
+
+// sendQuery is send with an encoded query string. The query goes into the
+// URL only: the signature covers the canonical path, never the query.
+func (c *Client) sendQuery(ctx context.Context, method, path, query, body, idempotencyKey string) (*response, error) {
 	if ctx == nil {
 		return nil, newValidationError("ctx must not be nil")
 	}
@@ -948,7 +1111,11 @@ func (c *Client) send(ctx context.Context, method, path, body, idempotencyKey st
 	if body != "" {
 		reader = strings.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	target := c.baseURL + path
+	if query != "" {
+		target += "?" + query
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, reader)
 	if err != nil {
 		return nil, newValidationError("Could not build the request: " + err.Error())
 	}
@@ -1020,10 +1187,16 @@ func (c *Client) send(ctx context.Context, method, path, body, idempotencyKey st
 		))
 		rateErr.ErrorCode = firstNonEmpty(inner.ErrorCode, envelope.Error.code())
 		rateErr.RetryAfterSeconds, rateErr.HasRetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
+		if parsedJSON {
+			rateErr.Raw = json.RawMessage(raw)
+		}
 		return nil, rateErr
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	case resp.StatusCode == http.StatusUnauthorized:
 		code := firstNonEmpty(inner.ErrorCode, envelope.Error.code(), "UNAUTHORIZED")
-		return nil, newAuthError(code, "Authentication failed - check your key id, secret, and server clock.")
+		return nil, newAuthError(resp.StatusCode, code, "Authentication failed - check your key id, secret, and server clock.")
+	case resp.StatusCode == http.StatusForbidden:
+		code := firstNonEmpty(inner.ErrorCode, envelope.Error.code(), "UNAUTHORIZED")
+		return nil, newAuthError(resp.StatusCode, code, forbiddenMessage(code, firstNonEmpty(inner.ErrorMessage, envelope.Error.message())))
 	}
 
 	return &response{
@@ -1034,6 +1207,21 @@ func (c *Client) send(ctx context.Context, method, path, body, idempotencyKey st
 		err:      envelope.Error,
 		parsed:   parsedJSON,
 	}, nil
+}
+
+// forbiddenMessage is the message of a 403. The clock hint is for 401 only: a
+// 403 means the request was signed correctly, so the key id, the secret and
+// the clock are fine, and the key may not do this.
+func forbiddenMessage(code, apiMessage string) string {
+	switch code {
+	case ErrorCodeInsufficientScope:
+		// The API's own message names the scope the route needs.
+		scope := strings.TrimRight(firstNonEmpty(apiMessage, "This API key does not have the scope this route requires"), ".")
+		return scope + ". A key's scopes are fixed when it is issued: use a key that holds this scope."
+	case ErrorCodeVerifyOnlyNotEnabled:
+		return "Verify-only sessions are not enabled for this account. We switch it on for your account: ask Dominaite support."
+	}
+	return fmt.Sprintf("Access denied (HTTP 403 %s): this API key may not call this route.", code)
 }
 
 // readLimited reads a response body up to maxResponseBytes. A body that runs

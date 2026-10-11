@@ -2,6 +2,7 @@ package dominaite
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"reflect"
 	"testing"
@@ -23,7 +24,8 @@ type wireErrorCode struct {
 type wireContract struct {
 	Statuses   []string `json:"statuses"`
 	ErrorCodes struct {
-		Storefront []wireErrorCode `json:"storefront"`
+		Storefront    []wireErrorCode `json:"storefront"`
+		Authorization []wireErrorCode `json:"authorization"`
 	} `json:"errorCodes"`
 	WebhookEventCatalog []string `json:"webhookEventCatalog"`
 	Wallets             struct {
@@ -119,6 +121,23 @@ func TestWireContractStorefrontErrorCodes(t *testing.T) {
 		if want[entry.Code] != entry.HTTPStatus {
 			t.Errorf("%s: HTTP %d, want %d", entry.Code, entry.HTTPStatus, want[entry.Code])
 		}
+	}
+}
+
+func TestWireContractAuthorizationErrorCodes(t *testing.T) {
+	wire := loadWireContract(t)
+	var codes []string
+	for _, entry := range wire.ErrorCodes.Authorization {
+		codes = append(codes, entry.Code)
+		if entry.HTTPStatus != http.StatusForbidden {
+			t.Errorf("%s: HTTP %d, want 403", entry.Code, entry.HTTPStatus)
+		}
+		if entry.Retry == nil || *entry.Retry {
+			t.Errorf("%s: retry = %v, want false", entry.Code, entry.Retry)
+		}
+	}
+	if !reflect.DeepEqual(AuthorizationErrorCodes, codes) {
+		t.Fatalf("AuthorizationErrorCodes drifted from the gateway contract\n  sdk:     %v\n  gateway: %v", AuthorizationErrorCodes, codes)
 	}
 }
 

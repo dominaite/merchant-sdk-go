@@ -15,9 +15,12 @@ type Customer struct {
 }
 
 // CreateCheckoutSessionParams are the parameters for
-// Client.CreateCheckoutSession. Amount, Currency and OrderReference are required.
+// Client.CreateCheckoutSession. Amount, Currency and OrderReference are
+// required. With VerifyOnly, leave Amount 0.
 type CreateCheckoutSessionParams struct {
-	// Amount is in MINOR units: 2500 is 25.00 EUR. Integers only.
+	// Amount is in MINOR units: 2500 is 25.00 EUR. Integers only. It must be
+	// positive, except with VerifyOnly, where it must be 0: the platform sets
+	// the verification amount.
 	Amount int64 `json:"amount"`
 	// Currency is ISO 4217, e.g. "EUR".
 	Currency string `json:"currency"`
@@ -39,6 +42,7 @@ type CreateCheckoutSessionParams struct {
 	// The stored method shows up on CheckoutStatus.StoredPaymentMethod after the
 	// payment succeeds; a declined first payment stores nothing. The card details
 	// themselves never reach you: you get an id, a brand and the last four digits.
+	// With VerifyOnly or AgreementID the card is always saved.
 	SaveCard bool `json:"saveCard,omitempty"`
 
 	// Integration picks how the payer enters the card: IntegrationWidget (the
@@ -48,6 +52,40 @@ type CreateCheckoutSessionParams struct {
 	// the idempotency identity: replaying a key with a different Integration is
 	// IDEMPOTENCY_KEY_REUSED. Empty sends no integration field.
 	Integration Integration `json:"integration,omitempty"`
+
+	// LocationID is the id of the storefront (online location) this payment
+	// belongs to. Empty uses your default storefront, or your only active one
+	// when no default is set. An id that is not one of your storefronts is
+	// refused with a 404 *APIError. An API key bound to one storefront refuses
+	// another id with ErrorCodeStorefrontMismatch.
+	LocationID string `json:"locationId,omitempty"`
+
+	// VerifyOnly saves the payer's card without a payment. The checkout places
+	// a small authorization to check the card and saves the card. The platform
+	// releases the authorization within about 15 minutes, so nobody is
+	// charged. Leave Amount 0. SaveCard is implied, Integration must be empty
+	// or IntegrationWidget, and AgreementID must be empty.
+	//
+	// Verify-only sessions are off until we switch them on for your account.
+	// Until then the session is refused with a 403 *AuthError, ErrorCode
+	// ErrorCodeVerifyOnlyNotEnabled. The status read of a verify-only session
+	// has VerifyOnly true, and a non-nil StoredPaymentMethod says the card is
+	// verified. It fires verification.* webhook events, never payment.* ones.
+	VerifyOnly bool `json:"verifyOnly,omitempty"`
+
+	// AgreementID is the agr_ id of a PENDING agreement (CreateAgreement). It
+	// makes this the subscription session: it takes the agreement's first
+	// payment, saves the card and activates the agreement. Amount and Currency
+	// must be the agreement's own; on a plan with a trial only the currency is
+	// held. A refusal arrives as a *RefusalError with one of the
+	// SubscriptionSessionRefusalCodes.
+	AgreementID string `json:"agreementId,omitempty"`
+
+	// Consent records that the payer accepted the platform's recurring payment
+	// terms on your page. Send it with AgreementID only. Consent.TextVersion
+	// must be a version of the platform text, e.g.
+	// ConsentTextVersionRecurring202609.
+	Consent *Consent `json:"consent,omitempty"`
 
 	// IdempotencyKey is required. Derive it from the order with
 	// OrderIdempotencyKey: the same order at the same amount must produce the
@@ -74,7 +112,23 @@ func (p CreateCheckoutSessionParams) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(p.Extra) == 0 {
+	return mergeExtra(base, p.Extra)
+}
+
+// verifyOnly reports whether the body asks for a verify-only session. Extra
+// wins over the field, as it does for every key.
+func (p CreateCheckoutSessionParams) verifyOnly() bool {
+	if value, ok := p.Extra["verifyOnly"]; ok {
+		flag, isBool := value.(bool)
+		return isBool && flag
+	}
+	return p.VerifyOnly
+}
+
+// mergeExtra merges extra into an encoded JSON object. A key in extra
+// replaces the modelled field of the same name.
+func mergeExtra(base []byte, extra map[string]any) ([]byte, error) {
+	if len(extra) == 0 {
 		return base, nil
 	}
 
@@ -82,7 +136,7 @@ func (p CreateCheckoutSessionParams) MarshalJSON() ([]byte, error) {
 	if err := json.Unmarshal(base, &merged); err != nil {
 		return nil, err
 	}
-	for key, value := range p.Extra {
+	for key, value := range extra {
 		raw, err := marshalNoEscape(value)
 		if err != nil {
 			return nil, err
@@ -92,6 +146,27 @@ func (p CreateCheckoutSessionParams) MarshalJSON() ([]byte, error) {
 
 	return marshalNoEscape(merged)
 }
+
+// Consent records that your customer accepted recurring payment terms: which
+// version of the text, when, and from which IP address. Send all three
+// together.
+type Consent struct {
+	// TextVersion is the version of the consent text the customer accepted,
+	// at most 50 characters. On a subscription session it must be a version
+	// of the platform text, e.g. ConsentTextVersionRecurring202609.
+	TextVersion string `json:"textVersion,omitempty"`
+	// AcceptedAt is the ISO 8601 UTC instant the customer accepted it, e.g.
+	// "2026-10-01T09:30:00Z". Not in the future.
+	AcceptedAt string `json:"acceptedAt,omitempty"`
+	// IP is the IPv4 or IPv6 address the customer accepted it from.
+	IP string `json:"ip,omitempty"`
+}
+
+// ConsentTextVersionRecurring202609 is the version of the platform's recurring
+// payment consent text that the subscription session accepts. Show this
+// version's text on your page. Older versions stay accepted for agreements that
+// were shown them.
+const ConsentTextVersionRecurring202609 = "recurring-2026-09"
 
 // marshalNoEscape encodes without Go's default HTML escaping, so an ampersand in
 // a customer name stays an ampersand. The signature covers the exact bytes we
@@ -132,6 +207,13 @@ type CheckoutSession struct {
 	// characters, the same on every replay. Hand it to the payer's page with the
 	// other session values; never log it or keep it past the session.
 	ClientSecret string `json:"clientSecret,omitempty"`
+	// VerifyOnly is true on a verify-only session: Amount is the verification
+	// hold, which is released once the card is saved. False on a payment
+	// session.
+	VerifyOnly bool `json:"verifyOnly,omitempty"`
+	// AgreementID is the agr_ id of the agreement this subscription session
+	// takes the first payment for. Empty on a one-off checkout.
+	AgreementID string `json:"agreementId,omitempty"`
 
 	// Raw is the unparsed payload, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
@@ -171,6 +253,21 @@ type Ping struct {
 	ClockSkewSeconds int64 `json:"clockSkewSeconds"`
 
 	// Raw is the unparsed payload, for fields this struct does not model yet.
+	Raw json.RawMessage `json:"-"`
+}
+
+// IntegrationContract is what GetIntegrationContract returns: the API's own
+// description of its routes, fields, codes and vocabularies.
+type IntegrationContract struct {
+	// Version is the dated version of the contract, e.g. "2026-09-16".
+	Version string `json:"version"`
+	// Statuses is the transaction status vocabulary, in the gateway's order.
+	Statuses []string `json:"statuses"`
+	// WebhookEventCatalog is the payment.* webhook event types. The recurring
+	// and verification event types are in their own sections of Raw.
+	WebhookEventCatalog []string `json:"webhookEventCatalog"`
+
+	// Raw is the whole contract as the API sent it.
 	Raw json.RawMessage `json:"-"`
 }
 
@@ -309,9 +406,47 @@ type CheckoutStatus struct {
 	// Not to be confused with PaymentMethod, which is the string category of
 	// how the payer paid ("card", "wallet", ...).
 	StoredPaymentMethod *StoredPaymentMethod `json:"storedPaymentMethod,omitempty"`
+	// VerifyOnly is true on a verify-only session: a card check, not a
+	// payment. Status stays the raw status (requires_capture, then cancelled
+	// once the hold is released). A non-nil StoredPaymentMethod is what says
+	// the card is verified. False on every other session.
+	VerifyOnly bool `json:"verifyOnly,omitempty"`
+	// DeclineClass is one of the DeclineClass* constants on a failed payment.
+	// Empty while the payment is open and on every other status. It can be
+	// empty on a failed payment too, for example when nobody declined the
+	// payment. A value outside DeclineClasses is a class this SDK does not name
+	// yet, not an error.
+	DeclineClass string `json:"declineClass,omitempty"`
+	// IsRecurring is true for a charge on a stored card without the payer
+	// present (a recurring charge), false for a checkout payment.
+	IsRecurring bool `json:"isRecurring,omitempty"`
+	// Agreement is the agreement the session took the first payment for, or
+	// the agreement a charge was placed under. nil on a one-off checkout or
+	// charge.
+	Agreement *CheckoutStatusAgreement `json:"agreement,omitempty"`
+	// Sequence is the data.sequence of the latest charge.* event about this
+	// transaction: compare it with the events you processed. 0 on a checkout
+	// payment, which sends payment.* events only, and before the first
+	// charge.* event.
+	Sequence int64 `json:"sequence,omitempty"`
 
 	// Raw is the unparsed payload, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
+}
+
+// CheckoutStatusAgreement is the agreement on a status read: enough to know
+// whether the subscription started. Read the whole agreement with
+// GetAgreement.
+type CheckoutStatusAgreement struct {
+	// ID is the agr_ id, case-sensitive.
+	ID string `json:"id"`
+	// Status is one of the AgreementStatus* values. It stays pending after a
+	// declined or abandoned subscription session: the subscription did not
+	// start.
+	Status string `json:"status"`
+	// NextChargeAt is ISO 8601 UTC. Empty while pending and once the
+	// agreement has ended.
+	NextChargeAt string `json:"nextChargeAt,omitempty"`
 }
 
 // Stored payment method status values, in the gateway's own order.
@@ -394,6 +529,16 @@ type ChargePaymentMethodParams struct {
 	OrderReference string `json:"orderReference"`
 	Description    string `json:"description,omitempty"`
 
+	// AgreementID is the agr_ id of the agreement this charge is made under.
+	// Empty charges the card on your own authority, as with any card on file:
+	// only the per-charge cap and the volume limits apply. When set, the
+	// charge must be on the agreement's terms: its payment method, its
+	// consent, its currency and its amount rule. The gateway refuses anything
+	// else with a 422 *ChargeError, or a 404 *APIError (AGREEMENT_NOT_FOUND)
+	// for an agreement that is not yours. The charge records the agreement,
+	// so a dispute can be answered with the consent the customer gave.
+	AgreementID string `json:"agreementId,omitempty"`
+
 	// IdempotencyKey is required. Derive it from what you are charging for
 	// (the order, the billing period), never per attempt: retrying with the
 	// same key never charges the card twice, so on a timeout retry with the
@@ -401,11 +546,31 @@ type ChargePaymentMethodParams struct {
 	// body. 1 to 100 visible ASCII characters; anything else is refused with a
 	// *ValidationError before anything is sent.
 	IdempotencyKey string `json:"-"`
+
+	// Extra carries any additional field the API accepts that this struct does
+	// not model yet. Keys here are merged into the JSON body and replace a
+	// modelled field of the same name.
+	Extra map[string]any `json:"-"`
+}
+
+// MarshalJSON emits the request body: the modelled fields in declaration order,
+// with Extra merged in. IdempotencyKey is excluded; it is a header, not a body
+// field.
+func (p ChargePaymentMethodParams) MarshalJSON() ([]byte, error) {
+	// The local type drops this method, so json.Marshal does not recurse.
+	type params ChargePaymentMethodParams
+
+	base, err := marshalNoEscape(params(p))
+	if err != nil {
+		return nil, err
+	}
+	return mergeExtra(base, p.Extra)
 }
 
 // Charge status values returned by ChargePaymentMethod, in the gateway's own
 // order. ChargeStatusSucceeded: the money moved. ChargeStatusFailed: it did
-// not; on a 402 DeclineClass says why. ChargeStatusPending is not terminal:
+// not; DeclineClass says why, when the class is known. ChargeStatusPending is
+// not terminal:
 // keep polling GetStatus on the charge's TransactionID. ChargeStatusCancelled:
 // an authorization voided before capture, no money moved.
 const (
@@ -459,15 +624,27 @@ type PaymentMethodCharge struct {
 	// Status is one of the ChargeStatus* constants. Treat anything you do not
 	// recognise as still open.
 	Status string `json:"status"`
-	// DeclineClass is one of the DeclineClass* constants, set on a 402 decline.
-	// Empty everywhere else (the gateway omits it on the wire).
+	// DeclineClass is one of the DeclineClass* constants on a failed charge. It
+	// can be empty, for example when nobody declined the payment. An empty
+	// class is not hard: if you retry, retry as for DeclineClassSoftOther. The
+	// status read (GetStatus on TransactionID) carries the latest class. Empty
+	// on every status other than failed.
 	DeclineClass string `json:"declineClass,omitempty"`
-	// DeclineCode is the raw decline code, for your logs; branch on
-	// DeclineClass instead. Empty when DeclineClass is.
+	// DeclineCode is the issuer's decline code, verbatim, for your logs;
+	// branch on DeclineClass instead. Empty unless the charge failed.
 	DeclineCode string `json:"declineCode,omitempty"`
 	// TransactionID is the transaction the charge created; readable with
 	// GetStatus.
 	TransactionID string `json:"transactionId"`
+	// AgreementID is the agr_ id the charge was placed under, when the request
+	// named one. Empty otherwise.
+	AgreementID string `json:"agreementId,omitempty"`
+	// Sequence is the charge's outcome counter as of this answer: on a charge
+	// decided at once, the data.sequence of its charge.succeeded or
+	// charge.failed event. 0 while pending. A replay returns the first answer
+	// unchanged, so it can be lower than a later event's; GetStatus carries
+	// the live value.
+	Sequence int64 `json:"sequence,omitempty"`
 
 	// Raw is the unparsed charge object, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
@@ -492,6 +669,25 @@ type CreateRefundParams struct {
 	// 100 visible ASCII characters; anything else is refused with a
 	// *ValidationError before anything is sent.
 	IdempotencyKey string `json:"-"`
+
+	// Extra carries any additional field the API accepts that this struct does
+	// not model yet. Keys here are merged into the JSON body and replace a
+	// modelled field of the same name.
+	Extra map[string]any `json:"-"`
+}
+
+// MarshalJSON emits the request body: the modelled fields, with Extra merged
+// in. A nil Amount is left out. IdempotencyKey is excluded; it is a header,
+// not a body field.
+func (p CreateRefundParams) MarshalJSON() ([]byte, error) {
+	// The local type drops this method, so json.Marshal does not recurse.
+	type params CreateRefundParams
+
+	base, err := marshalNoEscape(params(p))
+	if err != nil {
+		return nil, err
+	}
+	return mergeExtra(base, p.Extra)
 }
 
 // Refund status values, in the gateway's own order. RefundStatusPending: queued.
@@ -554,8 +750,35 @@ type Refund struct {
 	Raw json.RawMessage `json:"-"`
 }
 
-// Webhook event types. This is the complete v1 catalog - endpoint registration
-// rejects anything outside it, and the match is case-sensitive.
+// RefundList is what ListRefunds returns: the refunds of one payment created
+// through this API, and the amounts that decide the next refund. Every amount
+// is in MINOR units of Currency.
+type RefundList struct {
+	// TransactionID is the payment whose refunds these are.
+	TransactionID string `json:"transactionId"`
+	// Currency is the ISO 4217 code of the payment and of every amount here.
+	Currency string `json:"currency"`
+	// RefundedAmount is what was refunded so far, from every source: this
+	// API, the dashboard and the provider.
+	RefundedAmount int64 `json:"refundedAmount"`
+	// RefundableAmount is what a new refund could take right now: what is not
+	// refunded yet, minus refunds still in progress. 0 when the payment
+	// cannot be refunded.
+	RefundableAmount int64 `json:"refundableAmount"`
+	// Refunds are the refunds created through this API: pending first, then
+	// processing, then succeeded and failed, newest first within each group.
+	// Empty when there are none.
+	Refunds []Refund `json:"refunds"`
+
+	// Raw is the unparsed refund list, for fields this struct does not model yet.
+	Raw json.RawMessage `json:"-"`
+}
+
+// Webhook event types of payments: the contract's webhookEventCatalog. With
+// the agreement, charge and verification types below, they are every type
+// that endpoint registration accepts. It refuses any other type, and the match
+// is case-sensitive. The list can grow: treat a type you do not know as a
+// no-op.
 //
 // EventPaymentSucceeded is the ONLY signal that means money is in hand. The
 // in-flight states (pending, processing) are deliberately not webhooked; poll
@@ -568,6 +791,32 @@ const (
 	EventPaymentAbandoned       = "payment.abandoned"
 	EventPaymentRefunded        = "payment.refunded"
 	EventPaymentDisputed        = "payment.disputed"
+)
+
+// Webhook event types of agreements and saved-card charges. They carry
+// Data.Sequence: order them by it, never by CreatedAt.
+//
+// EventAgreementPastDue: the platform gave up on the current period on the
+// agreement's card. Nothing cancels the agreement automatically.
+// EventChargeFailed: nothing more is tried for this charge. For a one-off
+// charge it can arrive again for the same chargeId with a new decline class;
+// keep the latest. EventChargeRetrying: an agreement period was declined
+// softly, and the platform tries the same card again.
+const (
+	EventAgreementActivated = "agreement.activated"
+	EventAgreementPastDue   = "agreement.past_due"
+	EventAgreementCancelled = "agreement.cancelled"
+	EventChargeSucceeded    = "charge.succeeded"
+	EventChargeFailed       = "charge.failed"
+	EventChargeRetrying     = "charge.retrying"
+)
+
+// Webhook event types of verify-only sessions. A verify-only session never
+// fires payment.* events. EventVerificationFailed fires when the issuer
+// declined or the payer abandoned the checkout; no card is saved.
+const (
+	EventVerificationSucceeded = "verification.succeeded"
+	EventVerificationFailed    = "verification.failed"
 )
 
 // WebhookEvent is one verified webhook delivery. VerifyWebhook returns it; there
@@ -680,6 +929,16 @@ type WebhookData struct {
 	//
 	// charge.* events carry storedPaymentMethodId instead (read it from Raw).
 	StoredPaymentMethod *StoredPaymentMethod `json:"storedPaymentMethod,omitempty"`
+
+	// VerifyOnly is true on every event of a verify-only session. False (or
+	// absent on the wire) on every other event.
+	VerifyOnly bool `json:"verifyOnly"`
+	// DeclineClass is one of the DeclineClass* constants on payment.failed,
+	// verification.failed and the charge.failed and charge.retrying events.
+	// It can be empty, for example when nobody declined the payment. Empty
+	// (null or absent on the wire) on every other event. A value outside
+	// DeclineClasses is a class this SDK does not name yet, not an error.
+	DeclineClass string `json:"declineClass"`
 
 	// Sequence orders agreement.* and charge.* events for one object: it counts
 	// the announced changes of that object, only ever rises, and a redelivery

@@ -124,15 +124,167 @@ const (
 	ErrorCodeIdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED"
 )
 
-// AuthError means the API rejected your credentials or signature (HTTP 401/403).
-// Not retryable: fix the key id, the secret, the server clock, or the caller
+// Subscription session refusal codes, in the gateway's own order: the
+// RefusalError.ErrorCode of a session created with AgreementID. They arrive
+// as HTTP 200 with success false, like every session refusal. Nothing was
+// created under any of them, and none changes on a retry with the same body.
+const (
+	// ErrorCodeAgreementNotFound: no agreement with this id under your
+	// account. The agr_ id is case-sensitive; send it exactly as it was
+	// returned. The agreement routes answer the same code as a 404 *APIError.
+	ErrorCodeAgreementNotFound = "AGREEMENT_NOT_FOUND"
+	// ErrorCodeAgreementNotPending: the agreement is already active,
+	// cancelled, completed or failed, so there is no first payment left to
+	// take.
+	ErrorCodeAgreementNotPending = "AGREEMENT_NOT_PENDING"
+	// ErrorCodeAgreementAmountMismatch: the amount or the currency is not the
+	// agreement's own. On a plan without a trial the session must charge
+	// exactly the agreement's amount; the currency must always match.
+	ErrorCodeAgreementAmountMismatch = "AGREEMENT_AMOUNT_MISMATCH"
+	// ErrorCodeAgreementConsentRequired: neither the session nor the
+	// agreement carries consent to a version of the platform text. Send
+	// Consent, with all three fields, on the session.
+	ErrorCodeAgreementConsentRequired = "AGREEMENT_CONSENT_REQUIRED"
+	// ErrorCodeAgreementSessionOpen: a session for this agreement is still
+	// open, and TransactionID names it. Mint a new session with a new key
+	// only after that one has expired.
+	ErrorCodeAgreementSessionOpen = "AGREEMENT_SESSION_OPEN"
+	// ErrorCodeAgreementAlreadyPaid: the session of this agreement was paid,
+	// and the agreement is still pending. Read the status of TransactionID.
+	// If the agreement stays pending, contact support with both ids. Never
+	// mint again: that would charge the customer twice.
+	ErrorCodeAgreementAlreadyPaid = "AGREEMENT_ALREADY_PAID"
+	// ErrorCodeAgreementVariableAmountUnsupported: the agreement has a
+	// MaxAmountPerPeriod, and a session can take the first payment of a
+	// fixed-amount agreement only.
+	ErrorCodeAgreementVariableAmountUnsupported = "AGREEMENT_VARIABLE_AMOUNT_UNSUPPORTED"
+	// ErrorCodeSubscriptionsNotEnabled: subscriptions are not switched on for
+	// your account yet. Plans and agreements can already be created. Contact
+	// support; do not retry on a schedule.
+	ErrorCodeSubscriptionsNotEnabled = "SUBSCRIPTIONS_NOT_ENABLED"
+)
+
+// SubscriptionSessionRefusalCodes are the refusal codes of a session created
+// with AgreementID, in the gateway's own order. Treat a code you do not know
+// as not retryable.
+var SubscriptionSessionRefusalCodes = []string{
+	ErrorCodeAgreementNotFound,
+	ErrorCodeAgreementNotPending,
+	ErrorCodeAgreementAmountMismatch,
+	ErrorCodeAgreementConsentRequired,
+	ErrorCodeAgreementSessionOpen,
+	ErrorCodeAgreementAlreadyPaid,
+	ErrorCodeAgreementVariableAmountUnsupported,
+	ErrorCodeSubscriptionsNotEnabled,
+}
+
+// Codes of the plan and agreement routes. They arrive on APIError.ErrorCode,
+// with the status on APIError.HTTPStatus. ErrorCodeAgreementNotFound (404),
+// ErrorCodeAgreementConsentRequired (422: CreateAgreement names a stored
+// payment method or a MaxAmountPerPeriod without Consent) and
+// ErrorCodeIdempotencyKeyReused (422: the key was first used for a different
+// plan or agreement) arrive there too. The list is additive: treat a 4xx code
+// you do not know as not retryable. A 5xx is a *TransportError: nothing was
+// created, so retry with the same key.
+const (
+	// ErrorCodePlanNotFound (404): no plan with this id under your account.
+	// The plan_ id is case-sensitive; send it exactly as it was returned.
+	ErrorCodePlanNotFound = "PLAN_NOT_FOUND"
+	// ErrorCodePlanNotActive (409, CreateAgreement): the plan is archived.
+	ErrorCodePlanNotActive = "PLAN_NOT_ACTIVE"
+	// ErrorCodeAgreementEnded (409, CancelAgreement): the agreement already
+	// completed or failed, so there is nothing left to cancel.
+	ErrorCodeAgreementEnded = "AGREEMENT_ENDED"
+	// ErrorCodePaymentMethodNotFound (404, CreateAgreement): no stored
+	// payment method with this id under your account.
+	ErrorCodePaymentMethodNotFound = "PAYMENT_METHOD_NOT_FOUND"
+	// ErrorCodePaymentMethodNotActive (409, CreateAgreement): the stored
+	// payment method is revoked, expired or retired. Leave it out and let the
+	// subscription session save a fresh card.
+	ErrorCodePaymentMethodNotActive = "PAYMENT_METHOD_NOT_ACTIVE"
+	// ErrorCodePaymentMethodCurrencyMismatch (422, CreateAgreement): the card
+	// was saved from a payment in another currency than the plan's.
+	ErrorCodePaymentMethodCurrencyMismatch = "PAYMENT_METHOD_CURRENCY_MISMATCH"
+	// ErrorCodePaymentMethodCurrencyUnknown (422, CreateAgreement): the
+	// currency of the card cannot be established, so it cannot back an
+	// agreement. Leave it out and let the subscription session save a fresh
+	// card.
+	ErrorCodePaymentMethodCurrencyUnknown = "PAYMENT_METHOD_CURRENCY_UNKNOWN"
+	// ErrorCodeMaxAmountBelowPlanAmount (422, CreateAgreement):
+	// MaxAmountPerPeriod is below the plan's amount.
+	ErrorCodeMaxAmountBelowPlanAmount = "MAX_AMOUNT_BELOW_PLAN_AMOUNT"
+)
+
+// Codes of the webhook endpoint routes. They arrive on APIError.ErrorCode,
+// with the status on APIError.HTTPStatus. ErrorCodeIdempotencyKeyReused (422:
+// the key was first used for a different URL or events) and
+// ErrorCodeDuplicateRequest (409: a request with this key is in progress;
+// retry with the same key after a second) arrive there too. Nothing was
+// registered under any of them.
+const (
+	// ErrorCodeWebhookURLRejected (400): the URL is not https, is malformed,
+	// does not resolve, or points at a private, loopback or link-local host.
+	// The message says which.
+	ErrorCodeWebhookURLRejected = "WEBHOOK_URL_REJECTED"
+	// ErrorCodeWebhookLimitReached (409): you already have the maximum of 25
+	// active endpoints. Delete one first.
+	ErrorCodeWebhookLimitReached = "WEBHOOK_LIMIT_REACHED"
+	// ErrorCodeWebhookAlreadyRegistered (409): this key registered an endpoint
+	// more than a day ago, and that endpoint still exists. Its id is at
+	// error.params.webhookId in APIError.Raw. Use a fresh key for a new
+	// endpoint.
+	ErrorCodeWebhookAlreadyRegistered = "WEBHOOK_ALREADY_REGISTERED"
+	// ErrorCodeWebhookNotFound (404, DeleteWebhookEndpoint): no endpoint with
+	// this id under your account. After a lost answer, treat it as done.
+	ErrorCodeWebhookNotFound = "WEBHOOK_NOT_FOUND"
+)
+
+// ErrorCodeInsufficientScope (HTTP 403, on every route that needs a scope):
+// the request was signed correctly, but the API key does not hold the scope
+// the route needs. It arrives as an *AuthError with HTTPStatus 403. A key's
+// scopes are fixed when it is issued, so a retry with the same key gets the
+// same answer: call the route with a key that holds its scope.
+//
+// The scopes are payments (sessions, charges, revokes, refunds, plans and
+// agreements), transactions:read (ListTransactions) and webhooks:manage (the
+// webhook endpoint routes). A key holds either payments, or one or both of
+// the other two: use a separate reporting key for transactions and webhook
+// endpoints.
+const ErrorCodeInsufficientScope = "INSUFFICIENT_SCOPE"
+
+// ErrorCodeVerifyOnlyNotEnabled (HTTP 403, CreateCheckoutSession): the
+// session asked for VerifyOnly, and verify-only sessions are not enabled for
+// your account. It arrives as an *AuthError with HTTPStatus 403. Nothing was
+// created and the idempotency key is not spent. We switch it on for your
+// account: ask Dominaite support.
+const ErrorCodeVerifyOnlyNotEnabled = "VERIFY_ONLY_NOT_ENABLED"
+
+// AuthorizationErrorCodes are the codes a correctly signed request can be
+// refused with because of what the key may do, in the gateway's own order.
+// None is retryable.
+var AuthorizationErrorCodes = []string{
+	ErrorCodeInsufficientScope,
+}
+
+// AuthError means the API refused the request before it did anything: HTTP 401
+// or 403, on HTTPStatus. A retry with the same key and config gets the same
+// answer.
+//
+// HTTP 401: the API could not authenticate the request. ErrorCode is one of
+// INVALID_API_KEY, INVALID_SIGNATURE, TIMESTAMP_OUT_OF_RANGE or
+// IP_NOT_ALLOWED. Fix the key id, the secret, the server clock or the caller
 // allowlist.
 //
-// ErrorCode is one of INVALID_API_KEY, INVALID_SIGNATURE,
-// TIMESTAMP_OUT_OF_RANGE, IP_NOT_ALLOWED.
+// HTTP 403: the request was signed correctly, so the key id, the secret and
+// the clock are fine, but the key may not do this. ErrorCode is
+// ErrorCodeInsufficientScope (the key does not hold the scope the route
+// needs) or ErrorCodeVerifyOnlyNotEnabled (a verify-only session on an
+// account without verify-only sessions). Message says what to do.
 type AuthError struct {
 	baseError
-	ErrorCode string
+	// HTTPStatus is 401 or 403.
+	HTTPStatus int
+	ErrorCode  string
 }
 
 // RateLimitError means the API answered HTTP 429: you sent requests faster than
@@ -161,13 +313,41 @@ type AuthError struct {
 //		// reschedule with the same idempotency key
 //	}
 //
-// ErrorCode is the machine-readable code when the API named one. Empty otherwise.
+// ErrorCode is the machine-readable code when the API named one, empty
+// otherwise: ErrorCodeRateLimitExceeded for the request limits, and
+// ErrorCodeChargeVelocityExceeded or ErrorCodeChargeDeclineRateExceeded on
+// ChargePaymentMethod. Raw is the whole envelope; the charge limits put their
+// window and limit under error.params.
 type RateLimitError struct {
 	baseError
 	RetryAfterSeconds int
 	HasRetryAfter     bool
 	ErrorCode         string
+	// Raw is the whole envelope the gateway sent, for fields not modelled
+	// above. Empty when the 429 had no body.
+	Raw json.RawMessage
 }
+
+// Rate limit codes, on RateLimitError.ErrorCode. Nothing was created or
+// charged under any of them; retry with the SAME idempotency key once the
+// wait is over.
+const (
+	// ErrorCodeRateLimitExceeded: the key or the IP address sent more
+	// requests than it may. Retry-After says how long to wait. The API sends
+	// no Retry-After when it locks an address out after repeated failed
+	// sign-ins; fix the credentials before you retry.
+	ErrorCodeRateLimitExceeded = "RATE_LIMIT_EXCEEDED"
+	// ErrorCodeChargeVelocityExceeded (ChargePaymentMethod): a volume limit
+	// refused the charge before anything was placed. error.params.window and
+	// error.params.limit on Raw say which limit. A charge that keeps hitting
+	// it is a pattern to look into, not to retry around.
+	ErrorCodeChargeVelocityExceeded = "CHARGE_VELOCITY_EXCEEDED"
+	// ErrorCodeChargeDeclineRateExceeded (ChargePaymentMethod): the key
+	// collected too many declined charges in a short window, so its charge
+	// route is locked for a while. The other routes keep working. If this is
+	// a genuine billing run with many declines, contact support.
+	ErrorCodeChargeDeclineRateExceeded = "CHARGE_DECLINE_RATE_EXCEEDED"
+)
 
 // Charge error codes, in the gateway's own order: the codes ChargePaymentMethod
 // returns as a *ChargeError. CHARGE_DECLINED (HTTP 402) is deliberately not one
@@ -402,10 +582,16 @@ type RefundError struct {
 // empty. A 409 carrying ErrorCodeStorefrontNotWhitelisted or
 // ErrorCodeStorefrontInactive, or a 400 carrying ErrorCodeStorefrontMismatch,
 // means the storefront refused the session. Empty when the API named no code.
+//
+// Raw is the whole envelope the API sent with a rejection, for fields not
+// modelled above: error.params, error.validationErrors and error.traceId. It
+// is nil when there was no JSON envelope, and on an unexpected 2xx.
 type APIError struct {
 	baseError
 	HTTPStatus int
 	ErrorCode  string
+	// Raw is the whole envelope the API sent, for fields not modelled above.
+	Raw json.RawMessage
 }
 
 // TransportError means a network-level failure, a timeout, or a 5xx. The request
@@ -450,8 +636,8 @@ func newRevokeError(status int, code, message string, raw json.RawMessage) *Revo
 	return &RevokeError{baseError: baseError{Message: message}, HTTPStatus: status, ErrorCode: code, Raw: raw}
 }
 
-func newAuthError(code, message string) *AuthError {
-	return &AuthError{baseError: baseError{Message: message}, ErrorCode: code}
+func newAuthError(status int, code, message string) *AuthError {
+	return &AuthError{baseError: baseError{Message: message}, HTTPStatus: status, ErrorCode: code}
 }
 
 func newRateLimitError(message string) *RateLimitError {

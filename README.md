@@ -42,8 +42,9 @@ If the key has an IP allowlist, calls from anywhere else fail with `IP_NOT_ALLOW
 allowlist is managed on the same dashboard tab.
 
 A webhook endpoint has a **third** secret, separate from the two above: `whsec_...`, shown once
-when you create the endpoint on the **Webhooks** tab. It signs deliveries to you rather than
-requests from you, so it is never sent anywhere - see [Webhooks](#webhooks).
+when you create the endpoint on the **Webhooks** tab or with `CreateWebhookEndpoint`. It signs
+deliveries to you rather than requests from you, so it is never sent anywhere - see
+[Webhooks](#webhooks).
 
 ## Quickstart (zero to a paid order)
 
@@ -350,6 +351,8 @@ event.Data.OriginalTransactionID  // parent, on refunds and reversals
 event.Data.IdempotencyKey    // your own mint key, when the gateway knows it
 event.Data.PSPReference      // processor reference on payment.* events; empty until known
 event.Data.StoredPaymentMethod  // *StoredPaymentMethod on payment.* events; nil when none
+event.Data.VerifyOnly        // true on every event of a verify-only session
+event.Data.DeclineClass      // on payment.failed, verification.failed and charge.*; can be empty
 event.Data.Sequence          // per-object order on agreement.* and charge.*; 0 when absent
 event.Data.Raw               // the data object, for fields not modelled above
 event.Raw                    // the verified bytes, for anything not modelled above
@@ -384,11 +387,21 @@ approval was announced. `GetStatus` is the source of truth, so on a `SaveCard` s
 event has `StoredPaymentMethod == nil`, read the status to pick the card up. `charge.*` events
 carry `storedPaymentMethodId` instead (read it from `Data.Raw`).
 
+`DeclineClass` is one of `DeclineClasses` on `payment.failed`, `verification.failed`,
+`charge.failed` and `charge.retrying`. It can be empty, for example when nobody declined the
+payment. An empty class is not `hard`. `VerifyOnly` is true on every event of a verify-only
+session.
+
 ### Event catalog
 
-`payment.succeeded`, `payment.failed`, `payment.requires_capture`, `payment.cancelled`,
-`payment.abandoned`, `payment.refunded`, `payment.disputed` (exported as the `Event*`
-constants). The set is closed and case-sensitive; endpoint registration rejects anything else.
+| Group | Event types |
+|---|---|
+| Payments | `payment.succeeded`, `payment.failed`, `payment.requires_capture`, `payment.cancelled`, `payment.abandoned`, `payment.refunded`, `payment.disputed` |
+| Subscriptions and saved-card charges | `agreement.activated`, `agreement.past_due`, `agreement.cancelled`, `charge.succeeded`, `charge.failed`, `charge.retrying` |
+| Verify-only sessions | `verification.succeeded`, `verification.failed` |
+
+All of them are exported as the `Event*` constants. Endpoint registration accepts these types
+and refuses any other. The match is case-sensitive.
 
 - `payment.succeeded` is the **only** signal that means money is in hand.
 - `payment.refunded` fires once per refund, from the refund row - never from the parent
@@ -396,6 +409,15 @@ constants). The set is closed and case-sensitive; endpoint registration rejects 
 - `payment.requires_capture` includes approved pre-auth holds. It is not an unpaid order.
 - `payment.cancelled` is a pre-completion void only.
 - `payment.abandoned` is the terminal sweep verdict on a checkout that was never paid.
+- `agreement.past_due` means that the platform gave up on the current period on this card. The
+  agreement stays `past_due` until the period is paid on another card, or until you cancel it.
+  Nothing cancels it automatically.
+- `charge.failed` means that nothing more is tried for this charge. For a one-off charge it can
+  arrive again for the same `chargeId` with a new decline class: keep the latest one.
+- `charge.retrying` means that an agreement period was declined softly, and the platform tries
+  the same card again. The agreement stays `active`.
+- A verify-only session never fires `payment.*` events. `verification.failed` fires when the
+  issuer declined or the payer abandoned the checkout. No card is saved.
 
 `pending` and `processing` are deliberately not webhooked. Poll session status if you want to
 drive in-flight UX off them.
@@ -483,6 +505,66 @@ There is no overlap window, and `VerifyWebhook` rejects a header carrying more t
 rather than trying candidates in turn. Update the secret in your configuration as part of the
 same change that regenerates it.
 
+### Managing endpoints from code
+
+You can register endpoints on the **Webhooks** tab, or from code. The webhook endpoint routes
+need a key with the `webhooks:manage` scope. A key with the `payments` scope cannot hold it, so
+use a separate key for them.
+
+```go
+reporting, err := dominaite.New(reportingKeyID, reportingSecret)
+endpoint, err := reporting.CreateWebhookEndpoint(ctx, dominaite.CreateWebhookEndpointParams{
+	URL:            "https://shop.example/hooks/dominaite",
+	Events:         []string{dominaite.EventPaymentSucceeded, dominaite.EventPaymentRefunded},
+	IdempotencyKey: "webhook-orders-2026", // a fresh key for each new endpoint
+})
+// endpoint.Secret == "whsec_...": store it now, it is never shown again
+```
+
+`Secret` is in the first answer only. A replay of the same key, the list and every other answer
+leave it empty. Lost the secret? Delete the endpoint and create it again. Printing a
+`WebhookEndpoint` never shows the secret, but `Raw` of the first answer holds it: never log
+`Raw`.
+
+`IdempotencyKey` is required and signed. After no answer, a timeout or a 5xx, retry with the
+**same** key: the retry replaces an endpoint the lost attempt registered, and answers a new id
+and a new secret. One key never holds two endpoints. A 503 can last a while: retry for about
+five minutes, then check `ListWebhookEndpoints` and delete any endpoint you never got a secret
+for. The same key with other URL or events is refused with
+`IDEMPOTENCY_KEY_REUSED`. A key used again more than a day later, while its endpoint still
+exists, is refused with `WEBHOOK_ALREADY_REGISTERED`:
+
+```go
+var apiErr *dominaite.APIError
+if errors.As(err, &apiErr) && apiErr.ErrorCode == dominaite.ErrorCodeWebhookAlreadyRegistered {
+	var envelope struct {
+		Error struct {
+			Params struct {
+				WebhookID string `json:"webhookId"`
+			} `json:"params"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(apiErr.Raw, &envelope) // envelope.Error.Params.WebhookID is the endpoint
+}
+```
+
+`ListWebhookEndpoints` returns your endpoints, newest first, without secrets: every active
+endpoint and your newest 1000 inactive ones. `DeleteWebhookEndpoint` stops the deliveries at
+once. An id that is unknown or already deleted answers a 404 `*APIError` with `ErrorCode`
+`WEBHOOK_NOT_FOUND`: after a lost answer to a delete, treat that as done.
+
+Coded refusals are an `*APIError` with `HTTPStatus` and `ErrorCode`. Nothing was registered
+under any of them:
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `WEBHOOK_URL_REJECTED` | 400 | The URL is not https, is malformed, does not resolve, or points at a private host. |
+| `WEBHOOK_LIMIT_REACHED` | 409 | You already have the maximum of 25 active endpoints. Delete one first. |
+| `WEBHOOK_ALREADY_REGISTERED` | 409 | This key registered an endpoint more than a day ago. Use a fresh key. |
+| `WEBHOOK_NOT_FOUND` | 404 | `DeleteWebhookEndpoint`: no endpoint with this id under your account. |
+| `IDEMPOTENCY_KEY_REUSED` | 422 | The key was first used for other URL or events. |
+| `DUPLICATE_REQUEST` | 409 | A request with this key is in progress. Retry with the **same** key after a second. |
+
 ### Testing your handler
 
 The suite in this repo pins the canonical cross-SDK vector, byte for byte, along with tamper,
@@ -519,7 +601,8 @@ and cancelling the context returns a `*TransportError` wrapping `context.Cancele
 
 `Amount` is always an integer in the currency's minor unit: `2500` is 25.00 EUR. The field is an
 `int64`, so a float will not compile; non-positive values are rejected before anything reaches
-the network. The amount is locked server-side - what you pass here is what gets charged; nothing
+the network. The one exception is a [verify-only session](#verify-only-sessions), whose amount
+is 0. The amount is locked server-side - what you pass here is what gets charged; nothing
 in the browser can change it.
 
 Prices usually live as decimals in your catalog. Convert them with `ToMinorUnits`, which does it
@@ -701,6 +784,7 @@ case dominaite.ChargeStatusPending:
 	// Not terminal. Poll GetStatus(charge.TransactionID), or wait for the webhook.
 case dominaite.ChargeStatusFailed:
 	// HTTP 402 from the gateway, but not an error: branch on the class, log the code.
+	// An empty class is not hard: if you retry, retry as for DeclineClassSoftOther.
 	// DeclineClassHard            - give up on this card, ask the customer for another one
 	// DeclineClassSoftFunds       - insufficient funds, retry later (not in a loop)
 	// DeclineClassSoftSCARequired - the issuer wants the customer present: send them through a
@@ -724,19 +808,177 @@ if errors.As(err, &revokeErr) && revokeErr.ErrorCode == dominaite.RevokeErrorMer
 A charge is signed exactly like a session and carries an `Idempotency-Key`, so a retry after a
 timeout with the **same** key never charges the card twice: the gateway replays its first answer,
 HTTP status included. The HTTP status is the contract on this route: 201 (or 200 on a replay)
-returns the charge, 402 returns the charge too (`Status` `failed` plus `DeclineClass`), and 409,
+returns the charge, 402 returns the charge too (`Status` `failed`), and 409,
 422, 502 and 503 return a `*ChargeError` with `ErrorCode`, `HTTPStatus`, the gateway's message
 and, when the gateway attached the charge row, `Charge` and `TransactionID`. Only authentication
 (401/403), an id that is not yours (404, `*APIError` with `ErrorCode` `PAYMENT_METHOD_NOT_FOUND`),
 validation (400, `*APIError`), rate limiting (429) and network failures or a 5xx without a code
-keep their generic errors. `DeclineClass` and `DeclineCode` are empty unless the charge was
-declined; the gateway omits them on the wire.
+keep their generic errors. `DeclineClass` and `DeclineCode` are empty unless the charge failed.
+`DeclineClass` can be empty, for example when nobody declined the payment. An empty class is not
+`hard`; if you retry, retry as for `soft_other`.
+
+Set `AgreementID` to charge under an [agreement](#subscriptions-plans-and-agreements). The charge
+must then be on the agreement's terms: its payment method, its consent, its currency and its
+amount rule. A charge off those terms is refused with a 422 `*ChargeError` whose `ErrorCode`
+names the rule. An agreement that is not yours is a 404 `*APIError` with `ErrorCode`
+`AGREEMENT_NOT_FOUND`.
 
 Revoking signs an empty key and an empty body, like `GetStatus`. A revoke that fails with
 `*RevokeError` changed nothing: `MERCHANT_API_UNAVAILABLE` (503) is retryable,
 `UPSTREAM_CONTRACT_ERROR` (502) is not. After a revoke the status read keeps the
 `StoredPaymentMethod` with `Status` `revoked`, and a charge against it is refused with
 `PAYMENT_METHOD_NOT_ACTIVE`. An id that is not yours is an `*APIError` with `HTTPStatus` 404.
+
+## Verify-only sessions
+
+A verify-only session saves the payer's card without a payment. Use it to put a card on file
+before the first charge, for example at sign-up.
+
+Verify-only sessions are off by default. We switch it on for your account. Until then, a
+verify-only session is refused with a 403 `*AuthError` with `ErrorCode`
+`VERIFY_ONLY_NOT_ENABLED`. Nothing is created, and the idempotency key is not spent.
+
+```go
+session, err := client.CreateCheckoutSession(ctx, dominaite.CreateCheckoutSessionParams{
+	// Amount stays 0: the platform sets the verification amount.
+	Currency:       "EUR",
+	OrderReference: "card-check-customer-8817",
+	VerifyOnly:     true,
+	IdempotencyKey: "verify-customer-8817", // derive it from the customer, never per call
+})
+```
+
+1. The checkout places a small authorization to check the card, and saves the card.
+2. The platform releases the authorization within about 15 minutes. You and the payer are never
+   charged.
+3. `GetStatus` shows the result, with `VerifyOnly` true. A non-nil `StoredPaymentMethod` says
+   that the card is verified. `Status` stays the raw status: `requires_capture`, then
+   `cancelled` when the authorization is released.
+4. The session sends a `verification.succeeded` or `verification.failed` webhook event. It never
+   sends `payment.*` events.
+
+`Amount` must be 0. `SaveCard` is implied. `Integration` must be empty or `IntegrationWidget`, and
+`AgreementID` must be empty. The SDK refuses a negative amount before it sends anything. The API
+refuses the other combinations with a 400.
+
+## Subscriptions: plans and agreements
+
+A plan is a price and a billing interval you sell. An agreement subscribes one customer to a
+plan, and the platform then charges the customer every period. The plan and agreement routes
+need a key with the `payments` scope.
+
+### Plans
+
+```go
+plan, err := client.CreatePlan(ctx, dominaite.CreatePlanParams{
+	Name:           "Gold",
+	Amount:         2500, // per period, in minor units
+	Currency:       "EUR",
+	IntervalUnit:   dominaite.IntervalUnitMonth,
+	IntervalCount:  3, // every 3 months; 0 sends nothing and the API uses 1
+	TrialDays:      14,
+	CancelURL:      "https://shop.example/account/cancel",
+	IdempotencyKey: "plan-gold-quarterly", // derive it from YOUR plan record
+})
+// plan.ID == "plan_...": store it exactly as it is, it is case-sensitive
+```
+
+`IdempotencyKey` is required and signed. The same key with the same body answers the same plan
+(HTTP 200 instead of 201), so a create whose answer you lost is safe to repeat. The same key
+with a different body is refused with `IDEMPOTENCY_KEY_REUSED`.
+
+Amount, currency and interval never change. To change a price, create a new plan, archive the
+old one, and move your customers deliberately. `UpdatePlan` changes only the name, the trial
+for agreements created from now on, and the cancel page. A nil field keeps its value:
+
+```go
+name, noCancelPage := "Gold plus", ""
+plan, err = client.UpdatePlan(ctx, plan.ID, dominaite.UpdatePlanParams{
+	Name:      &name,
+	CancelURL: &noCancelPage, // "" removes the cancel page
+})
+```
+
+`UpdatePlan` sends no idempotency key: the route takes none. `DeletePlan` archives the plan: it
+accepts no new agreements, and its agreements continue unchanged. Deleting an archived plan
+succeeds again. `ListPlans` returns at most 200 plans, active first, then newest first. It has
+no pages: read a plan by id with `GetPlan`.
+
+A plan that is not yours is a 404 `*APIError` with `ErrorCode` `PLAN_NOT_FOUND`. A field the
+API refused is a 400 `*APIError`, and `Raw` carries `error.validationErrors`. A 5xx is a
+`*TransportError`: nothing was created, so retry with the same key.
+
+### Agreements
+
+An agreement subscribes one customer to an active plan. It is created `pending`, and nothing is
+charged:
+
+```go
+agreement, err := client.CreateAgreement(ctx, dominaite.CreateAgreementParams{
+	PlanID:            plan.ID,
+	CustomerReference: "customer-8817", // your own id for the customer
+	IdempotencyKey:    "subscription-8817-gold",
+})
+// agreement.ID == "agr_...", agreement.Status == dominaite.AgreementStatusPending
+```
+
+The subscription session takes the first payment, saves the card and activates the agreement.
+It is `CreateCheckoutSession` with `AgreementID` and `Consent`:
+
+```go
+session, err := client.CreateCheckoutSession(ctx, dominaite.CreateCheckoutSessionParams{
+	Amount:         agreement.Amount, // exactly the agreement's amount on a plan without a trial
+	Currency:       agreement.Currency,
+	OrderReference: "subscription-8817-first",
+	AgreementID:    agreement.ID,
+	Consent: &dominaite.Consent{
+		TextVersion: dominaite.ConsentTextVersionRecurring202609, // the platform text your page showed
+		AcceptedAt:  "2026-10-01T09:30:00Z",
+		IP:          customerIP,
+	},
+	IdempotencyKey: "subscription-8817-first",
+})
+```
+
+On a plan without a trial, the session's payment is the first period. On a plan with a trial,
+the session charges the amount you send, and the first scheduled charge comes when the trial
+ends. The session saves the card whatever `SaveCard` says. A session refusal is a
+`*RefusalError` with one of the `SubscriptionSessionRefusalCodes`. After activation the
+platform charges the card every period. Follow it with the `agreement.*` and `charge.*` webhook
+events, or read the agreement with `GetAgreement`. `GetStatus` on the session's transaction
+shows the agreement as `Agreement`: its id, status and next charge. It stays `pending` after a
+declined or abandoned session, which means that the subscription did not start.
+
+To bill a card the customer already saved, set `StoredPaymentMethodID` on `CreateAgreement`.
+`Consent` is then required: your own label for the wording the customer accepted, when, and from
+which IP address. A variable-amount subscription (seat plus usage) sets `MaxAmountPerPeriod`, the
+most one charge may be. It also requires `Consent`. A subscription session cannot take the first
+payment of a variable agreement: it refuses with `AGREEMENT_VARIABLE_AMOUNT_UNSUPPORTED`.
+
+`CancelAgreement` cancels from `pending`, `active` or `past_due`: no further charge is
+scheduled, and a charge already placed is not reversed. Cancelling a cancelled agreement
+succeeds again. The platform never cancels an agreement on its own: a `past_due` agreement stays
+`past_due` until the period is paid on another card or you cancel it. `PastDueReason` says why
+it is past due.
+
+Coded refusals of the plan and agreement routes are an `*APIError` with `HTTPStatus` and
+`ErrorCode`. None of them changes on a retry:
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `PLAN_NOT_FOUND` | 404 | No plan with this id under your account. |
+| `PLAN_NOT_ACTIVE` | 409 | `CreateAgreement`: the plan is archived. |
+| `AGREEMENT_NOT_FOUND` | 404 | No agreement with this id under your account. |
+| `AGREEMENT_ENDED` | 409 | `CancelAgreement`: the agreement already completed or failed. |
+| `PAYMENT_METHOD_NOT_FOUND` | 404 | No stored payment method with this id under your account. |
+| `PAYMENT_METHOD_NOT_ACTIVE` | 409 | The stored card is revoked, expired or retired. |
+| `PAYMENT_METHOD_CURRENCY_MISMATCH` | 422 | The card was saved from a payment in another currency than the plan's. |
+| `PAYMENT_METHOD_CURRENCY_UNKNOWN` | 422 | The currency of the card cannot be established. |
+| `MAX_AMOUNT_BELOW_PLAN_AMOUNT` | 422 | `MaxAmountPerPeriod` is below the plan's amount. |
+| `AGREEMENT_CONSENT_REQUIRED` | 422 | A stored card or a `MaxAmountPerPeriod` without `Consent`. |
+| `IDEMPOTENCY_KEY_REUSED` | 422 | The key was first used for a different plan or agreement. |
+
+A field the API refused is a 400 `*APIError`, and `Raw` carries `error.validationErrors`.
 
 ## Refunds
 
@@ -787,6 +1029,21 @@ on `failed`. `FailureCode` is set on `failed` only: `REFUND_AMOUNT_EXCEEDED`,
 `PAYMENT_NOT_REFUNDABLE` or `REFUND_FAILED` (the `RefundFailure*` constants); treat a value you
 do not recognise as `REFUND_FAILED`. A failed refund is final for its key: a new attempt needs a
 new key. `CompletedAt` is set once the refund is final.
+
+`ListRefunds` reads all refunds of one payment that were created through this API, and the
+amounts that decide the next refund:
+
+```go
+list, err := client.ListRefunds(ctx, transactionID)
+// list.RefundableAmount: what a new refund can take right now
+// list.RefundedAmount: refunded so far, from every source
+// list.Refunds: pending first, then processing, then succeeded and failed, newest first
+```
+
+A refund made in the dashboard or at the provider is not in `Refunds`, but `RefundedAmount`
+counts it. A new refund appears in the list at the same moment `GetRefund` stops answering
+`REFUND_NOT_FOUND`. `ListRefunds` signs an empty key and an empty body, like `GetRefund`, and
+returns the same errors.
 
 Coded refusals are a `*RefundError` with `HTTPStatus`, `ErrorCode` (the `RefundError*`
 constants) and `Retryable`:
@@ -851,6 +1108,16 @@ is a wallet this SDK does not name yet; treat it as valid, not as an error.
 `requires_capture` is **not** "unpaid": the payer has already paid and the funds are held
 awaiting capture. Never treat it as an abandoned order.
 
+Five fields describe declines, saved-card charges and subscriptions:
+
+- `DeclineClass` is one of `DeclineClasses` on a failed payment. It can be empty, for example
+  when nobody declined the payment.
+- `IsRecurring` is true for a charge on a stored card without the payer present.
+- `Agreement` is the agreement of a subscription session or charge, nil on a one-off.
+- `Sequence` orders the read against the `charge.*` events of the same transaction. It is 0 on
+  a checkout payment.
+- `VerifyOnly` is true on a verify-only session.
+
 Treat any status you do not recognise as still-open as well: a value the API adds later should
 make you keep polling, never silently close an order that is still live.
 
@@ -860,6 +1127,69 @@ over returns a `*RateLimitError`.
 
 Both response types also carry `Raw` (`json.RawMessage`) with the unparsed payload, for fields
 the structs do not model yet.
+
+## Listing your transactions (reporting)
+
+`ListTransactions` reads your card-not-present payments, one page at a time: checkout payments,
+saved-card charges, subscription charges and verify-only sessions. It needs a key with the
+`transactions:read` scope. A key with the `payments` scope cannot hold it, so use a separate
+reporting key.
+
+```go
+reporting, err := dominaite.New(reportingKeyID, reportingSecret)
+params := dominaite.ListTransactionsParams{
+	From: "2026-10-01T00:00:00Z", // inclusive
+	To:   "2026-11-01T00:00:00Z", // exclusive, at most 31 days after From
+}
+for {
+	page, err := reporting.ListTransactions(ctx, params)
+	if err != nil {
+		return err
+	}
+	for _, tx := range page.Items {
+		record(tx) // tx.TransactionID, tx.Type, tx.Status, tx.Amount, tx.RefundedAmount, ...
+	}
+	if page.NextCursor == "" {
+		break
+	}
+	params.Cursor = page.NextCursor
+}
+```
+
+- The window is [`From`, `To`) on `CreatedAt`, in ISO 8601 UTC. Use the Z form:
+  `t.UTC().Format(time.RFC3339)`.
+- The rows come oldest first. Send `NextCursor` back as `Cursor`, with the same `From`, `To`
+  and `Status`, until it is empty. Paging never repeats or skips a row.
+- `Limit` sets the page size, 1 to 100. 0 keeps the API default of 50. `Status` keeps only the
+  payments that are now in that status.
+- A row has its status at the time of the read. For a statement, end the window a few minutes
+  in the past, so that payments still being written are not missed. Read the window again
+  later to pick up changes such as refunds.
+- A refund is not a row of its own: it shows on its payment as `RefundedAmount` and `Status`.
+- `Type` is one of `TransactionTypes`. A `verification` row saved a card and is not a purchase,
+  so leave it out of revenue.
+- A key bound to a storefront lists the payments of that storefront only. Fees are not part of
+  this read.
+- The SDK signs the path only. The query string is not part of the signature.
+
+A window, status, limit or cursor that the API refuses is a 400 `*APIError` with `ErrorCode`
+`VALIDATION_ERROR`. `Raw` carries one `error.validationErrors` entry for each field.
+
+## Fields the SDK does not model yet
+
+Every request struct with a body has an `Extra` map: `CreateCheckoutSessionParams`,
+`ChargePaymentMethodParams`, `CreateRefundParams`, `CreatePlanParams`, `UpdatePlanParams`,
+`CreateAgreementParams` and `CreateWebhookEndpointParams`. The SDK merges its keys into the JSON
+body and signs the result. A key in `Extra` replaces the modelled field of the same name. Use it for
+a field the API added after this SDK version; you do not need a new SDK release for it.
+
+```go
+params.Extra = map[string]any{"someNewField": "value"}
+```
+
+Every response type has a `Raw` field with the unparsed JSON, for fields the SDK does not model
+yet. Status values, decline classes and event types are plain strings: a value this SDK does not
+know is never an error.
 
 ## Errors
 
@@ -879,11 +1209,11 @@ For the specific kind, use `errors.As` with the concrete pointer type:
 | `*ChargeError` | `ChargePaymentMethod` answered 409, 422, 502 or 503 with a code; `ErrorCode`, `HTTPStatus`, and `Charge`/`TransactionID` when the gateway attached the charge row. | Branch on `ErrorCode`; see [Stored payment methods](#stored-payment-methods-recurring). `CHARGE_OUTCOME_UNKNOWN`: poll `TransactionID`, never retry under a new key. |
 | `*RevokeError` | `RevokePaymentMethod` answered 502 (`UPSTREAM_CONTRACT_ERROR`) or 503 (`MERCHANT_API_UNAVAILABLE`). Nothing changed. | 503: retry later. 502: contact support with the id. |
 | `*RefundError` | `CreateRefund` or `GetRefund` answered 400, 404, 409 or 422 with a code; `ErrorCode`, `HTTPStatus` and `Retryable`. A failed refund is not an error: it is a `Refund` with `Status` `failed`. | Branch on `ErrorCode`; see [Refunds](#refunds). Retry with the same key only when `Retryable`. |
-| `*AuthError` | 401/403. `ErrorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
-| `*RateLimitError` | 429. `RetryAfterSeconds` carries the `Retry-After` header when the API sent one as integer seconds; `HasRetryAfter` tells "wait 0s" apart from "the API did not say". | Back off, then reschedule with the **same** idempotency key. The SDK never retries this for you. |
+| `*AuthError` | 401 or 403, on `HTTPStatus`. 401: `ErrorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. 403: the request was signed correctly, but the key may not do this. `ErrorCode` is `INSUFFICIENT_SCOPE` (the key does not hold the scope of the route) or `VERIFY_ONLY_NOT_ENABLED`. | 401: fix the key id, secret, server clock, or allowlist. 403 `INSUFFICIENT_SCOPE`: use a key that holds the scope. 403 `VERIFY_ONLY_NOT_ENABLED`: we switch it on for your account. Never retry-loop. |
+| `*RateLimitError` | 429. `ErrorCode` is `RATE_LIMIT_EXCEEDED`, or on a charge `CHARGE_VELOCITY_EXCEEDED` or `CHARGE_DECLINE_RATE_EXCEEDED`. `RetryAfterSeconds` carries the `Retry-After` header when the API sent one as integer seconds; `HasRetryAfter` tells "wait 0s" apart from "the API did not say". `Raw` is the whole envelope. | Back off, then reschedule with the **same** idempotency key. The SDK never retries this for you. |
 | `*TransportError` | Network failure, timeout, or a 5xx without a code the SDK models. Wraps the cause, reachable with `errors.Unwrap`. A 5xx classifies on the status, so an HTML or empty error page from an overloaded edge is still retryable. | Retry with the **same** idempotency key. |
-| `*APIError` | Any other rejecting or unexpected response; `HTTPStatus` and `ErrorCode` carry the details. | Inspect. A storefront refusal lands here (see [Storefront errors](#storefront-errors)). A 3xx means a proxy or a wrong base URL answered with a redirect - the SDK never follows one. A replayed idempotency key does not land here; it comes back as a `*RefusalError`. |
-| `*ValidationError` | Bad arguments (non-positive amount, missing field or idempotency key, malformed key id). | Fix the call; nothing was sent. |
+| `*APIError` | Any other rejecting or unexpected response; `HTTPStatus` and `ErrorCode` carry the details. `Raw` is the whole envelope of a rejection, with `error.params` and `error.validationErrors`. | Inspect. A storefront refusal lands here (see [Storefront errors](#storefront-errors)). A 3xx means a proxy or a wrong base URL answered with a redirect - the SDK never follows one. A replayed idempotency key does not land here; it comes back as a `*RefusalError`. |
+| `*ValidationError` | Bad arguments (non-positive amount outside a verify-only session, missing field or idempotency key, malformed key id). | Fix the call; nothing was sent. |
 | `*WebhookVerificationError` | `VerifyWebhook` rejected an inbound delivery; `Reason` carries which check failed. | Answer 400 with no detail. See [Webhooks](#rejections). |
 
 Refusal codes on `RefusalError.ErrorCode`, exported as `ErrorCode*` constants:
@@ -952,6 +1282,20 @@ the order-derived key for the life of the order to keep that path open. The band
 endless - once the platform has independently closed the attempt (about an hour past expiry),
 the replay answers `PRIOR_ATTEMPT_FAILED` and the key is spent; reconcile through `GetStatus`
 and use a fresh key.
+
+## Reading the API contract
+
+`GetIntegrationContract` reads the API's machine-readable contract: its routes, fields, error
+codes and vocabularies, as the API serves them now. The route is public, so it needs no scope.
+`Version`, `Statuses` and `WebhookEventCatalog` are typed; everything else is on `Raw`.
+
+```go
+contract, err := client.GetIntegrationContract(ctx)
+if err != nil {
+	return err
+}
+log.Printf("contract version %s", contract.Version) // e.g. 2026-09-16
+```
 
 ## Verifying your signing
 
