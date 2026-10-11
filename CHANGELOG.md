@@ -18,6 +18,9 @@
   on `payment.*` events. Empty when null or absent. Refund and cancel events carry the original
   payment's `OrderReference`. The README lists every identification field a `payment.*` event
   carries.
+- Wire contract fixture: regenerated from the production contract. It adds the
+  `errorCodes.authorization` group (403 `INSUFFICIENT_SCOPE`), which `ErrorCodeInsufficientScope`
+  and `AuthorizationErrorCodes` name.
 
 ## 0.4.0
 

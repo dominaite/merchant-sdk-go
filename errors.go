@@ -124,6 +124,26 @@ const (
 	ErrorCodeIdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED"
 )
 
+// ErrorCodeInsufficientScope (HTTP 403, on every route that needs a scope):
+// the request was signed correctly, but the API key does not hold the scope
+// the route needs. It arrives as an *AuthError with HTTPStatus 403. A key's
+// scopes are fixed when it is issued, so a retry with the same key gets the
+// same answer: call the route with a key that holds its scope.
+//
+// The scopes are payments (sessions, charges, revokes, refunds, plans and
+// agreements), transactions:read (ListTransactions) and webhooks:manage (the
+// webhook endpoint routes). A key holds either payments, or one or both of
+// the other two: use a separate reporting key for transactions and webhook
+// endpoints.
+const ErrorCodeInsufficientScope = "INSUFFICIENT_SCOPE"
+
+// AuthorizationErrorCodes are the codes a correctly signed request can be
+// refused with because of what the key may do, in the gateway's own order.
+// None is retryable.
+var AuthorizationErrorCodes = []string{
+	ErrorCodeInsufficientScope,
+}
+
 // AuthError means the API rejected your credentials or signature (HTTP 401/403).
 // Not retryable: fix the key id, the secret, the server clock, or the caller
 // allowlist.
