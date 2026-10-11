@@ -37,6 +37,9 @@
 - `GetIntegrationContract`: reads the API's machine-readable contract
   (GET `/merchant-api/integration/contract`). The route is public, so it needs no scope.
   `Version`, `Statuses` and `WebhookEventCatalog` are typed; the rest is on `Raw`.
+- `ListRefunds`: the refunds of one payment created through this API, with `RefundedAmount` and
+  `RefundableAmount` (GET `/merchant-api/payments/{transactionId}/refunds`). Errors as
+  `GetRefund`.
 - `AuthError.HTTPStatus`: 401 or 403.
 - `RateLimitError.Raw`, the whole envelope of a 429, and the rate limit codes
   `ErrorCodeRateLimitExceeded`, `ErrorCodeChargeVelocityExceeded` and

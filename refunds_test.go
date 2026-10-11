@@ -371,3 +371,99 @@ func TestRefundWithoutARefundBodyIsAnAPIError(t *testing.T) {
 		}
 	}
 }
+
+func TestListRefundsReadsTheListWithAnEmptyKeyAndBody(t *testing.T) {
+	failed := map[string]any{
+		"refundId":       "re_00000000000000000000000000000002",
+		"transactionId":  testRefundTransactionID,
+		"status":         "failed",
+		"currency":       "HUF",
+		"failureCode":    "REFUND_FAILED",
+		"failureMessage": "The refund could not be completed.",
+		"completedAt":    "2026-10-02T10:00:00Z",
+	}
+	server, calls := newTestServer(t, refundReply(http.StatusOK, map[string]any{
+		"transactionId":    testRefundTransactionID,
+		"currency":         "HUF",
+		"refundedAmount":   500,
+		"refundableAmount": 1000,
+		"refunds":          []any{pendingRefund(), failed},
+	}))
+	client := newTestClient(t, server.URL)
+
+	list, err := client.ListRefunds(context.Background(), "1A2B3C4D-5E6F-4A7B-8C9D-0E1F2A3B4C5D")
+	if err != nil {
+		t.Fatalf("ListRefunds: %v", err)
+	}
+
+	call := calls()[0]
+	path := PaymentsPath + "/" + testRefundTransactionID + "/refunds"
+	if call.Method != http.MethodGet || call.Path != path || call.Body != "" {
+		t.Fatalf("got %s %s with body %q, want GET %s", call.Method, call.Path, call.Body, path)
+	}
+	if call.Header.Get("Idempotency-Key") != "" {
+		t.Error("a GET sends no Idempotency-Key")
+	}
+	assertSignedWith(t, call, http.MethodGet, path, "")
+
+	if list.TransactionID != testRefundTransactionID || list.Currency != "HUF" || list.RefundedAmount != 500 || list.RefundableAmount != 1000 {
+		t.Fatalf("list = %+v", list)
+	}
+	if len(list.Refunds) != 2 {
+		t.Fatalf("got %d refunds, want 2", len(list.Refunds))
+	}
+	first, second := list.Refunds[0], list.Refunds[1]
+	if first.RefundID != testRefundID || first.Status != RefundStatusPending || first.Amount == nil || *first.Amount != 1500 {
+		t.Errorf("first refund = %+v", first)
+	}
+	if second.Status != RefundStatusFailed || second.FailureCode != RefundFailureFailed || second.Amount != nil {
+		t.Errorf("second refund = %+v", second)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(second.Raw, &raw); err != nil || raw["refundId"] != failed["refundId"] {
+		t.Errorf("each refund keeps its own Raw, got %s", second.Raw)
+	}
+}
+
+func TestListRefundsWithNoRefundsIsAnEmptyList(t *testing.T) {
+	server, _ := newTestServer(t, refundReply(http.StatusOK, map[string]any{
+		"transactionId":    testRefundTransactionID,
+		"currency":         "EUR",
+		"refundedAmount":   0,
+		"refundableAmount": 2500,
+		"refunds":          []any{},
+	}))
+	client := newTestClient(t, server.URL)
+
+	list, err := client.ListRefunds(context.Background(), testRefundTransactionID)
+	if err != nil {
+		t.Fatalf("ListRefunds: %v", err)
+	}
+	if list.Refunds == nil || len(list.Refunds) != 0 || list.RefundableAmount != 2500 {
+		t.Fatalf("list = %+v", list)
+	}
+}
+
+func TestListRefundsMapsErrorsLikeGetRefund(t *testing.T) {
+	server, _ := newTestServer(t, chargeEnvelope(http.StatusNotFound, RefundErrorPaymentNotFound, "No such payment.", nil))
+	client := newTestClient(t, server.URL)
+
+	_, err := client.ListRefunds(context.Background(), testRefundTransactionID)
+	var refundErr *RefundError
+	if !errors.As(err, &refundErr) || refundErr.ErrorCode != RefundErrorPaymentNotFound || refundErr.HTTPStatus != http.StatusNotFound {
+		t.Fatalf("got %v, want *RefundError PAYMENT_NOT_FOUND", err)
+	}
+
+	unavailable, _ := newTestServer(t, chargeEnvelope(http.StatusServiceUnavailable, "MERCHANT_API_UNAVAILABLE", "Try again.", nil))
+	_, err = newTestClient(t, unavailable.URL).ListRefunds(context.Background(), testRefundTransactionID)
+	var transportErr *TransportError
+	if !errors.As(err, &transportErr) {
+		t.Fatalf("got %v, want *TransportError for a 503", err)
+	}
+
+	_, err = client.ListRefunds(context.Background(), "not-a-uuid")
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("got %v, want *ValidationError", err)
+	}
+}

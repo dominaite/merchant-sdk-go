@@ -56,8 +56,9 @@ const (
 	PaymentMethodsPath = "/merchant-api/payment-methods"
 
 	// PaymentsPath is the canonical path of payments. POST PaymentsPath +
-	// "/{transactionId}/refunds" refunds one; GET PaymentsPath +
-	// "/{transactionId}/refunds/{refundId}" reads a refund back.
+	// "/{transactionId}/refunds" refunds one, GET on the same path lists its
+	// refunds, and GET PaymentsPath + "/{transactionId}/refunds/{refundId}"
+	// reads a refund back.
 	PaymentsPath = "/merchant-api/payments"
 
 	// PingPath is the credentials-and-clock smoke test. It creates nothing.
@@ -699,6 +700,81 @@ func (c *Client) GetRefund(ctx context.Context, transactionID, refundID string) 
 	return reply.refund()
 }
 
+// ListRefunds lists the refunds of one payment that were created through this
+// API: pending first, then processing, then succeeded and failed, newest
+// first within each group. Each refund has the fields GetRefund returns. A
+// refund made in the dashboard or at the provider is not in the list, but
+// RefundedAmount counts it. A new refund shows up once it is picked up, the
+// same moment GetRefund stops answering REFUND_NOT_FOUND.
+//
+// RefundableAmount is what a new refund could take right now, so read it
+// before a partial refund to size it.
+//
+// Errors it returns: as GetRefund. An unknown payment is a *RefundError with
+// ErrorCode RefundErrorPaymentNotFound.
+func (c *Client) ListRefunds(ctx context.Context, transactionID string) (*RefundList, error) {
+	id, err := normalizeTransactionID(transactionID)
+	if err != nil {
+		return nil, err
+	}
+
+	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
+	// Idempotency-Key header.
+	reply, err := c.send(ctx, http.MethodGet, PaymentsPath+"/"+id+"/refunds", "", "")
+	if err != nil {
+		return nil, err
+	}
+	if reply.status >= 400 {
+		return nil, reply.refundRejection()
+	}
+	if !reply.parsed || !isJSONObject(reply.data) {
+		return nil, newAPIError(reply.status, "The API answered the refund list without a refund list body")
+	}
+
+	var wire struct {
+		TransactionID    string          `json:"transactionId"`
+		Currency         string          `json:"currency"`
+		RefundedAmount   int64           `json:"refundedAmount"`
+		RefundableAmount int64           `json:"refundableAmount"`
+		Refunds          json.RawMessage `json:"refunds"`
+	}
+	if json.Unmarshal(reply.data, &wire) != nil || wire.TransactionID == "" {
+		return nil, newAPIError(reply.status, "The API returned an unexpected refund list")
+	}
+	refunds, err := decodeItems(wire.Refunds, func(refund *Refund, raw json.RawMessage) { refund.Raw = raw })
+	if err != nil {
+		return nil, newAPIError(reply.status, "The API returned an unexpected refund in the refund list")
+	}
+
+	return &RefundList{
+		TransactionID:    wire.TransactionID,
+		Currency:         wire.Currency,
+		RefundedAmount:   wire.RefundedAmount,
+		RefundableAmount: wire.RefundableAmount,
+		Refunds:          refunds,
+		Raw:              reply.data,
+	}, nil
+}
+
+// decodeItems decodes a JSON array one element at a time, so every item keeps
+// its own bytes on its Raw field. null and an absent array decode as empty.
+func decodeItems[T any](raw json.RawMessage, keepRaw func(*T, json.RawMessage)) ([]T, error) {
+	var elements []json.RawMessage
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &elements); err != nil {
+			return nil, err
+		}
+	}
+	items := make([]T, len(elements))
+	for i, element := range elements {
+		if err := json.Unmarshal(element, &items[i]); err != nil {
+			return nil, err
+		}
+		keepRaw(&items[i], element)
+	}
+	return items, nil
+}
+
 // prepareSessionRequest validates the params and returns the idempotency key and
 // the exact body bytes that will be both signed and sent.
 func prepareSessionRequest(params CreateCheckoutSessionParams) (string, string, error) {
@@ -924,11 +1000,7 @@ func (r *response) charge() *PaymentMethodCharge {
 // a coded 4xx, and the generic errors for the rest (5xx is a *TransportError).
 func (r *response) refund() (*Refund, error) {
 	if r.status >= 400 {
-		code := r.err.code()
-		if code != "" && r.status < 500 {
-			return nil, newRefundError(r.status, code, firstNonEmpty(r.err.message(), "The refund was refused."), r.envelope)
-		}
-		return nil, r.rejection()
+		return nil, r.refundRejection()
 	}
 	if !r.parsed || !isJSONObject(r.data) {
 		return nil, newAPIError(r.status, "The API answered the refund without a refund body")
@@ -938,6 +1010,16 @@ func (r *response) refund() (*Refund, error) {
 		return nil, newAPIError(r.status, "The API returned an unexpected refund object")
 	}
 	return refund, nil
+}
+
+// refundRejection reads a failed refund route's reply: a *RefundError for a
+// coded 4xx, the generic errors for the rest (5xx is a *TransportError).
+func (r *response) refundRejection() error {
+	code := r.err.code()
+	if code != "" && r.status < 500 {
+		return newRefundError(r.status, code, firstNonEmpty(r.err.message(), "The refund was refused."), r.envelope)
+	}
+	return r.rejection()
 }
 
 // rejection is the generic reading of a failed reply: 5xx is the API being

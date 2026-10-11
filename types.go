@@ -698,6 +698,30 @@ type Refund struct {
 	Raw json.RawMessage `json:"-"`
 }
 
+// RefundList is what ListRefunds returns: the refunds of one payment created
+// through this API, and the amounts that decide the next refund. Every amount
+// is in MINOR units of Currency.
+type RefundList struct {
+	// TransactionID is the payment whose refunds these are.
+	TransactionID string `json:"transactionId"`
+	// Currency is the ISO 4217 code of the payment and of every amount here.
+	Currency string `json:"currency"`
+	// RefundedAmount is what was refunded so far, from every source: this
+	// API, the dashboard and the provider.
+	RefundedAmount int64 `json:"refundedAmount"`
+	// RefundableAmount is what a new refund could take right now: what is not
+	// refunded yet, minus refunds still in progress. 0 when the payment
+	// cannot be refunded.
+	RefundableAmount int64 `json:"refundableAmount"`
+	// Refunds are the refunds created through this API: pending first, then
+	// processing, then succeeded and failed, newest first within each group.
+	// Empty when there are none.
+	Refunds []Refund `json:"refunds"`
+
+	// Raw is the unparsed refund list, for fields this struct does not model yet.
+	Raw json.RawMessage `json:"-"`
+}
+
 // Webhook event types. This is the complete v1 catalog - endpoint registration
 // rejects anything outside it, and the match is case-sensitive.
 //

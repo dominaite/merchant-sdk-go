@@ -832,6 +832,21 @@ on `failed`. `FailureCode` is set on `failed` only: `REFUND_AMOUNT_EXCEEDED`,
 do not recognise as `REFUND_FAILED`. A failed refund is final for its key: a new attempt needs a
 new key. `CompletedAt` is set once the refund is final.
 
+`ListRefunds` reads all refunds of one payment that were created through this API, and the
+amounts that decide the next refund:
+
+```go
+list, err := client.ListRefunds(ctx, transactionID)
+// list.RefundableAmount: what a new refund can take right now
+// list.RefundedAmount: refunded so far, from every source
+// list.Refunds: pending first, then processing, then succeeded and failed, newest first
+```
+
+A refund made in the dashboard or at the provider is not in `Refunds`, but `RefundedAmount`
+counts it. A new refund appears in the list at the same moment `GetRefund` stops answering
+`REFUND_NOT_FOUND`. `ListRefunds` signs an empty key and an empty body, like `GetRefund`, and
+returns the same errors.
+
 Coded refusals are a `*RefundError` with `HTTPStatus`, `ErrorCode` (the `RefundError*`
 constants) and `Retryable`:
 
