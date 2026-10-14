@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.1
+
+### Added
+
+- Settlement fields on `Transaction`: `Fee` and `NetAmount` (`*int64`, MINOR units),
+  `SettledAt` (ISO 8601 UTC at midnight) and `PayoutID`. Nil or empty until the acquirer
+  settles the payment, usually the next business day. `NetAmount` is `Amount` minus the fee of
+  this payment only.
+- Settlement window on `ListTransactionsParams`: `SettledFrom` and `SettledTo`, dates in the
+  form `2026-10-13`, sent together. `From` and `To` are still required. The signed path still
+  carries no query string.
+
 ## 0.5.0
 
 ### Added
