@@ -44,11 +44,13 @@ func TestListTransactionsSignsThePathWithoutTheQuery(t *testing.T) {
 	client := newTestClient(t, server.URL)
 
 	params := ListTransactionsParams{
-		From:   "2026-10-01T00:00:00Z",
-		To:     "2026-10-08T00:00:00+02:00",
-		Status: StatusSucceeded,
-		Limit:  100,
-		Cursor: "eyJjIjoiMjAyNi0xMC0wMSJ9+/=",
+		From:        "2026-10-01T00:00:00Z",
+		To:          "2026-10-08T00:00:00+02:00",
+		SettledFrom: "2026-10-13",
+		SettledTo:   "2026-10-14",
+		Status:      StatusSucceeded,
+		Limit:       100,
+		Cursor:      "eyJjIjoiMjAyNi0xMC0wMSJ9+/=",
 	}
 	if _, err := client.ListTransactions(context.Background(), params); err != nil {
 		t.Fatalf("ListTransactions: %v", err)
@@ -70,11 +72,13 @@ func TestListTransactionsSignsThePathWithoutTheQuery(t *testing.T) {
 		t.Fatalf("query %q: %v", call.Query, err)
 	}
 	want := map[string]string{
-		"from":   params.From,
-		"to":     params.To,
-		"status": "succeeded",
-		"limit":  "100",
-		"cursor": params.Cursor,
+		"from":        params.From,
+		"to":          params.To,
+		"settledFrom": "2026-10-13",
+		"settledTo":   "2026-10-14",
+		"status":      "succeeded",
+		"limit":       "100",
+		"cursor":      params.Cursor,
 	}
 	for key, value := range want {
 		if query.Get(key) != value {
@@ -118,6 +122,79 @@ func TestListTransactionsReadsThePage(t *testing.T) {
 	}
 	if len(charge.Raw) == 0 || string(charge.Raw) == string(payment.Raw) {
 		t.Errorf("each item keeps its own Raw")
+	}
+	// Neither row is settled: the gateway leaves the settlement fields out.
+	for _, tx := range page.Items {
+		if tx.Fee != nil || tx.NetAmount != nil || tx.SettledAt != "" || tx.PayoutID != "" {
+			t.Errorf("unsettled %s has settlement fields: %+v", tx.TransactionID, tx)
+		}
+	}
+}
+
+func TestListTransactionsReadsTheSettlementFields(t *testing.T) {
+	page := map[string]any{
+		"items": []any{
+			map[string]any{
+				"transactionId": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+				"type":          "payment",
+				"status":        "succeeded",
+				"amount":        2500,
+				"currency":      "EUR",
+				"createdAt":     "2026-10-12T09:30:00Z",
+				"fee":           45,
+				"netAmount":     2455,
+				"settledAt":     "2026-10-13T00:00:00Z",
+				"payoutId":      "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+			},
+			// Settled with no fee, not yet paid out, and null rather than absent.
+			map[string]any{
+				"transactionId": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e",
+				"type":          "charge",
+				"status":        "succeeded",
+				"amount":        990,
+				"currency":      "EUR",
+				"createdAt":     "2026-10-12T10:30:00Z",
+				"fee":           0,
+				"netAmount":     990,
+				"settledAt":     "2026-10-13T00:00:00Z",
+				"payoutId":      nil,
+			},
+			map[string]any{
+				"transactionId": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5f",
+				"type":          "payment",
+				"status":        "succeeded",
+				"amount":        700,
+				"currency":      "EUR",
+				"createdAt":     "2026-10-13T08:00:00Z",
+				"fee":           nil,
+				"netAmount":     nil,
+				"settledAt":     nil,
+			},
+		},
+		"nextCursor": nil,
+	}
+	server, _ := newTestServer(t, dataReply(http.StatusOK, page))
+	client := newTestClient(t, server.URL)
+
+	list, err := client.ListTransactions(context.Background(), ListTransactionsParams{From: "2026-09-14", To: "2026-10-14", SettledFrom: "2026-10-13", SettledTo: "2026-10-14"})
+	if err != nil {
+		t.Fatalf("ListTransactions: %v", err)
+	}
+	if len(list.Items) != 3 {
+		t.Fatalf("items = %d, want 3", len(list.Items))
+	}
+	paid, zeroFee, open := list.Items[0], list.Items[1], list.Items[2]
+	if paid.Fee == nil || *paid.Fee != 45 || paid.NetAmount == nil || *paid.NetAmount != 2455 ||
+		paid.SettledAt != "2026-10-13T00:00:00Z" || paid.PayoutID != "7c9e6679-7425-40de-944b-e07fc1f90ae7" {
+		t.Errorf("paid = %+v", paid)
+	}
+	// A zero fee is a settled fee, not a missing one.
+	if zeroFee.Fee == nil || *zeroFee.Fee != 0 || zeroFee.NetAmount == nil || *zeroFee.NetAmount != 990 ||
+		zeroFee.SettledAt == "" || zeroFee.PayoutID != "" {
+		t.Errorf("zeroFee = %+v", zeroFee)
+	}
+	if open.Fee != nil || open.NetAmount != nil || open.SettledAt != "" || open.PayoutID != "" {
+		t.Errorf("open = %+v", open)
 	}
 }
 

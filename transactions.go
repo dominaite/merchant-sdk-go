@@ -32,6 +32,14 @@ type ListTransactionsParams struct {
 	// To is the end of the window, exclusive, in the same form. Required. It
 	// must be later than From, at most 31 days after it.
 	To string
+	// SettledFrom is the start of the settlement window, inclusive: a date in
+	// the form "2026-10-13". Optional, but send it together with SettledTo.
+	// With it, the list has only payments the acquirer settled in the window.
+	// From and To still apply on CreatedAt.
+	SettledFrom string
+	// SettledTo is the end of the settlement window, exclusive, a date in the
+	// same form. It must be later than SettledFrom, at most 31 days after it.
+	SettledTo string
 	// Status keeps only payments now in this status: one of Statuses. Empty
 	// lists every status. The SDK does not check it: the API refuses an
 	// unknown status with a 400.
@@ -73,6 +81,19 @@ type Transaction struct {
 	// RefundedAmount is what was refunded so far, in MINOR units. 0 when
 	// nothing was refunded.
 	RefundedAmount int64 `json:"refundedAmount,omitempty"`
+	// Fee is the acquirer fee of this payment in MINOR units of Currency. nil
+	// until the payment is settled, usually the next business day. It can
+	// change, or go back to nil, when the settlement is matched again.
+	Fee *int64 `json:"fee,omitempty"`
+	// NetAmount is Amount minus Fee, in MINOR units. nil when Fee is nil. It
+	// does not include deductions the acquirer makes on the whole payout.
+	NetAmount *int64 `json:"netAmount,omitempty"`
+	// SettledAt is the date the acquirer settled the payment, as ISO 8601 UTC
+	// at midnight, e.g. "2026-10-13T00:00:00Z". Empty until settled.
+	SettledAt string `json:"settledAt,omitempty"`
+	// PayoutID is the id of the payout that paid this money to you, the id the
+	// dashboard shows. Empty until the money is paid out.
+	PayoutID string `json:"payoutId,omitempty"`
 
 	// Raw is the unparsed item, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
@@ -84,7 +105,7 @@ type TransactionList struct {
 	// window has none.
 	Items []Transaction `json:"items"`
 	// NextCursor reads the next page: send it back as Cursor with the same
-	// From, To and Status. Empty on the last page.
+	// From, To, SettledFrom, SettledTo and Status. Empty on the last page.
 	NextCursor string `json:"nextCursor,omitempty"`
 
 	// Raw is the unparsed page, for fields this struct does not model yet.
@@ -107,7 +128,7 @@ type TransactionList struct {
 //
 // Errors it returns:
 //   - *ValidationError: an empty From or To; nothing was sent.
-//   - *APIError: 400 VALIDATION_ERROR for a window, status, limit or cursor
+//   - *APIError: 400 VALIDATION_ERROR for a window, settlement window, status, limit or cursor
 //     the API refused. Raw carries error.validationErrors, one per field.
 //     Do not retry it unchanged.
 //   - *AuthError: also 403 INSUFFICIENT_SCOPE for a key without
@@ -120,6 +141,12 @@ func (c *Client) ListTransactions(ctx context.Context, params ListTransactionsPa
 	query := url.Values{}
 	query.Set("from", params.From)
 	query.Set("to", params.To)
+	if params.SettledFrom != "" {
+		query.Set("settledFrom", params.SettledFrom)
+	}
+	if params.SettledTo != "" {
+		query.Set("settledTo", params.SettledTo)
+	}
 	if params.Status != "" {
 		query.Set("status", params.Status)
 	}
