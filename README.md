@@ -1196,8 +1196,8 @@ for {
 
 - The window is [`From`, `To`) on `CreatedAt`, in ISO 8601 UTC. Use the Z form:
   `t.UTC().Format(time.RFC3339)`.
-- The rows come oldest first. Send `NextCursor` back as `Cursor`, with the same `From`, `To`
-  and `Status`, until it is empty. Paging never repeats or skips a row.
+- The rows come oldest first. Send `NextCursor` back as `Cursor`, with the same `From`, `To`,
+  `SettledFrom`, `SettledTo` and `Status`, until it is empty. Paging never repeats or skips a row.
 - `Limit` sets the page size, 1 to 100. 0 keeps the API default of 50. `Status` keeps only the
   payments that are now in that status.
 - A row has its status at the time of the read. For a statement, end the window a few minutes
@@ -1206,11 +1206,16 @@ for {
 - A refund is not a row of its own: it shows on its payment as `RefundedAmount` and `Status`.
 - `Type` is one of `TransactionTypes`. A `verification` row saved a card and is not a purchase,
   so leave it out of revenue.
-- Fees are not part of this read.
+- `Fee`, `NetAmount`, `SettledAt` and `PayoutID` are empty until the acquirer settles the
+  payment, usually the next business day. `Fee` and `NetAmount` can still change after that.
+- `NetAmount` is `Amount` minus the fee of this payment only, not the deductions on the payout.
+- To get one settlement day, set `SettledFrom` to that day and `SettledTo` to the next day
+  (`"2026-10-13"`, `"2026-10-14"`). Keep `From` and `To` wide enough to cover when those
+  payments were created, for example the last 31 days.
 - The SDK signs the path only. The query string is not part of the signature.
 
-A window, status, limit or cursor that the API refuses is a 400 `*APIError` with `ErrorCode`
-`VALIDATION_ERROR`. `Raw` carries one `error.validationErrors` entry for each field.
+A window, settlement window, status, limit or cursor that the API refuses is a 400 `*APIError`
+with `ErrorCode` `VALIDATION_ERROR`. `Raw` carries one `error.validationErrors` entry for each field.
 
 ## Fields the SDK does not model yet
 
