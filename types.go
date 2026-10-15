@@ -12,6 +12,18 @@ type Customer struct {
 	LastName  string `json:"lastName,omitempty"`
 	Email     string `json:"email,omitempty"`
 	Phone     string `json:"phone,omitempty"`
+	// Address is the billing street address, one line, at most 200
+	// characters. The widget asks the payer for address, city and postal
+	// code when the payment processor needs them, and skips a field you send.
+	Address string `json:"address,omitempty"`
+	// City is the billing city, at most 100 characters.
+	City string `json:"city,omitempty"`
+	// PostalCode is the billing postal code, at most 20 characters.
+	PostalCode string `json:"postalCode,omitempty"`
+	// State is the billing state or province code, at most 50 characters,
+	// e.g. "CA" or "NSW". Only used for the United States, Canada and
+	// Australia.
+	State string `json:"state,omitempty"`
 }
 
 // CreateCheckoutSessionParams are the parameters for
