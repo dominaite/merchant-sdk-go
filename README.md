@@ -167,6 +167,8 @@ func main() {
 			FirstName: "Ana",
 			LastName:  "Kirova",
 			Email:     "ana@example.com",
+			// Billing address too, when your checkout already has it: Address,
+			// City, PostalCode and State (US, Canada and Australia only).
 		},
 		Language: "bg",   // widget UI language
 		Theme:    "dark",
