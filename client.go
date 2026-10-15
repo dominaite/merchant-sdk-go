@@ -88,7 +88,7 @@ const (
 	IntegrationContractPath = "/merchant-api/integration/contract"
 
 	// Version is this SDK's version, reported in the User-Agent.
-	Version = "0.5.1"
+	Version = "0.5.2"
 
 	defaultTimeout = 45 * time.Second // serverless cold starts hit 10+s on dev; 15s was a coin flip
 
