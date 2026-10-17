@@ -27,8 +27,9 @@ type wireContract struct {
 		Storefront    []wireErrorCode `json:"storefront"`
 		Authorization []wireErrorCode `json:"authorization"`
 	} `json:"errorCodes"`
-	WebhookEventCatalog []string `json:"webhookEventCatalog"`
-	Wallets             struct {
+	WebhookEventCatalog    []string `json:"webhookEventCatalog"`
+	RecurringWebhookEvents []string `json:"recurringWebhookEvents"`
+	Wallets                struct {
 		WalletTypes     []string `json:"walletTypes"`
 		ReportingFields []struct {
 			Path     string `json:"path"`
@@ -72,6 +73,23 @@ func TestWireContractWebhookEventCatalog(t *testing.T) {
 	}
 	if !reflect.DeepEqual(events, wire.WebhookEventCatalog) {
 		t.Fatalf("Event* constants drifted from the gateway contract\n  sdk:     %v\n  gateway: %v", events, wire.WebhookEventCatalog)
+	}
+}
+
+// The agreement and charge events sit outside the event catalog, under the
+// contract's recurring section.
+func TestWireContractRecurringWebhookEvents(t *testing.T) {
+	wire := loadWireContract(t)
+	events := []string{
+		EventAgreementActivated,
+		EventAgreementPastDue,
+		EventAgreementCancelled,
+		EventChargeSucceeded,
+		EventChargeFailed,
+		EventChargeRetrying,
+	}
+	if !reflect.DeepEqual(events, wire.RecurringWebhookEvents) {
+		t.Fatalf("EventAgreement* and EventCharge* constants drifted from the gateway contract\n  sdk:     %v\n  gateway: %v", events, wire.RecurringWebhookEvents)
 	}
 }
 
