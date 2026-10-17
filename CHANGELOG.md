@@ -6,9 +6,9 @@
 
 - The client retries failed calls on its own, 2 times by default. Every GET and every POST
   that carries an idempotency key is covered, except `CreateWebhookEndpoint`. Only a
-  `*TransportError`, `PAYMENT_PROCESSING_UNAVAILABLE` and the charge route's 503
-  `PAYMENT_METHOD_CHARGES_DISABLED` are retried. Each attempt sends the same idempotency key
-  and body. Pass `WithMaxRetries(0)` to keep the 0.6.0 behaviour of one attempt per call.
+  `*TransportError` and `PAYMENT_PROCESSING_UNAVAILABLE` are retried. The charge route's 503
+  `PAYMENT_METHOD_CHARGES_DISABLED` is not: it holds until saved-card charges are switched on
+  for your account. Each attempt sends the same idempotency key and body. Pass `WithMaxRetries(0)` to keep the 0.6.0 behaviour of one attempt per call.
 - The timeout is per attempt. With retries, one call can take up to (maxRetries + 1) x the
   timeout plus the waits between attempts: 3 x 45s plus up to 1.5s at the defaults. Put a
   deadline on the context when a caller waits on the answer.
