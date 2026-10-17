@@ -194,7 +194,7 @@ func TestWhatIsRetried(t *testing.T) {
 	}{
 		{"a 5xx without a charge code", chargeEnvelope(http.StatusInternalServerError, ErrorCodeInternalError, "boom", nil), 3},
 		{"processing unavailable", chargeEnvelope(http.StatusServiceUnavailable, ChargeErrorProcessingUnavailable, "later", nil), 3},
-		{"charges disabled", chargeEnvelope(http.StatusServiceUnavailable, ChargeErrorChargesDisabled, "later", nil), 3},
+		{"charges disabled", chargeEnvelope(http.StatusServiceUnavailable, ChargeErrorChargesDisabled, "later", nil), 1},
 		{"outcome unknown", chargeEnvelope(http.StatusBadGateway, ChargeErrorOutcomeUnknown, "unknown", nil), 1},
 		{"charge failed", chargeEnvelope(http.StatusBadGateway, ChargeErrorFailed, "failed", nil), 1},
 		{"a 4xx charge error", chargeEnvelope(http.StatusConflict, ChargeErrorPaymentMethodNotActive, "revoked", nil), 1},
@@ -212,6 +212,24 @@ func TestWhatIsRetried(t *testing.T) {
 				t.Fatalf("%d calls, want %d", len(calls()), tc.want)
 			}
 		})
+	}
+}
+
+// PAYMENT_METHOD_CHARGES_DISABLED holds until saved-card charges are switched
+// on for the account, so a retry a second later only repeats the answer.
+func TestAChargesDisabledChargeIsSentOnce(t *testing.T) {
+	server, calls := newTestServer(t,
+		chargeEnvelope(http.StatusServiceUnavailable, ChargeErrorChargesDisabled, "off", nil),
+		successReply(),
+	)
+
+	_, err := newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), testPaymentMethodID, testChargeParams())
+	var chargeErr *ChargeError
+	if !errors.As(err, &chargeErr) || chargeErr.ErrorCode != ChargeErrorChargesDisabled {
+		t.Fatalf("got %v, want *ChargeError %s", err, ChargeErrorChargesDisabled)
+	}
+	if len(calls()) != 1 {
+		t.Fatalf("%d calls, want 1", len(calls()))
 	}
 }
 

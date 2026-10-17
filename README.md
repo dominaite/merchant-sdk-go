@@ -741,12 +741,12 @@ plans and agreements.
 
 - **What is retried:** a `*TransportError` (a network failure, a timeout or a 5xx, including
   `MERCHANT_API_UNAVAILABLE` and `INTERNAL_ERROR`) and `PAYMENT_PROCESSING_UNAVAILABLE`, both
-  the 503 and the HTTP 200 session refusal. On a charge, the 503
-  `PAYMENT_METHOD_CHARGES_DISABLED` is retried too. After the last attempt you get the last
-  error back.
+  the 503 and the HTTP 200 session refusal. After the last attempt you get the last error back.
 - **What is not retried:** a 429 (`*RateLimitError`, with `RetryAfterSeconds` kept for you), any
-  4xx, any other refusal, `CHARGE_OUTCOME_UNKNOWN` and `CHARGE_FAILED`. They will not change on
-  a retry, and retrying into a full queue only makes it longer.
+  4xx, any other refusal, `CHARGE_OUTCOME_UNKNOWN`, `CHARGE_FAILED` and the charge route's 503
+  `PAYMENT_METHOD_CHARGES_DISABLED`. They will not change on a retry, and retrying into a full
+  queue only makes it longer. `PAYMENT_METHOD_CHARGES_DISABLED` holds until saved-card charges
+  are switched on for your account, so retry it yourself later with the same idempotency key.
 - **Not covered:** `CreateWebhookEndpoint` is never retried, whatever the budget, because a
   retry can answer the endpoint without its secret. DELETE and PATCH calls
   (`RevokePaymentMethod`, `DeletePlan`, `CancelAgreement`, `DeleteWebhookEndpoint`,

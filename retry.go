@@ -26,9 +26,11 @@ const (
 // The client retries reads (every GET) and every POST that carries an
 // idempotency key, except CreateWebhookEndpoint, which is never retried. It
 // retries only a *TransportError (a network failure or a 5xx) and
-// PAYMENT_PROCESSING_UNAVAILABLE, on the refusal and on the charge error, plus
-// the charge route's 503 PAYMENT_METHOD_CHARGES_DISABLED. Every retry sends the
-// same idempotency key and the same body, signed again with a fresh timestamp.
+// PAYMENT_PROCESSING_UNAVAILABLE, on the refusal and on the charge error. The
+// charge route's 503 PAYMENT_METHOD_CHARGES_DISABLED is not retried: it lasts
+// until saved-card charges are switched on for your account. Every retry sends
+// the same idempotency key and the same body, signed again with a fresh
+// timestamp.
 // A 429 is never retried. Neither is a DELETE or a PATCH.
 //
 // The wait before retry n (0 for the first) is a random time between 0 and
@@ -90,9 +92,11 @@ func (c *Client) retryDelay(base time.Duration, n int) time.Duration {
 
 // isRetryable names the failures the client retries. Each leaves nothing
 // done, or is answered the same way again under the same idempotency key: a
-// transport failure or 5xx, card processing being unavailable right now, and
-// charges switched off for the moment. A charge outcome that is unknown or
-// failed is not retried; it is a *ChargeError to reconcile.
+// transport failure or 5xx, and card processing being unavailable right now.
+// PAYMENT_METHOD_CHARGES_DISABLED is not retried: it holds until saved-card
+// charges are switched on for the account, so a retry a second later answers
+// the same. A charge outcome that is unknown or failed is not retried; it is a
+// *ChargeError to reconcile.
 func isRetryable(err error) bool {
 	var transportErr *TransportError
 	if errors.As(err, &transportErr) {
@@ -104,8 +108,7 @@ func isRetryable(err error) bool {
 	}
 	var chargeErr *ChargeError
 	if errors.As(err, &chargeErr) {
-		return chargeErr.ErrorCode == ChargeErrorProcessingUnavailable ||
-			chargeErr.ErrorCode == ChargeErrorChargesDisabled
+		return chargeErr.ErrorCode == ChargeErrorProcessingUnavailable
 	}
 	return false
 }
