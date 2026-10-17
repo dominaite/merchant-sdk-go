@@ -9,8 +9,7 @@ go vet ./...
 go test -race ./...
 ```
 
-CI runs the same two commands. The race detector needs cgo, which the standard Go toolchain
-has on Linux and macOS.
+CI runs the same two commands.
 
 ## Runtime floor
 
