@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -130,6 +131,8 @@ type Client struct {
 	userAgent  string
 	now        func() time.Time
 	optionErr  error
+	logger     *slog.Logger // nil: warnings go to slog.Default(), no debug lines
+	notices    *noticeSet
 }
 
 // String keeps the secret out of your logs. Printing a Client with %v, %+v or
@@ -257,6 +260,7 @@ func New(keyID, secret string, opts ...Option) (*Client, error) {
 		httpClient: &http.Client{Timeout: defaultTimeout},
 		userAgent:  sdkUserAgent(),
 		now:        time.Now,
+		notices:    &noticeSet{},
 	}
 	for _, opt := range opts {
 		opt(client)
@@ -343,6 +347,9 @@ func (c *Client) Ping(ctx context.Context) (*Ping, error) {
 	ping := &Ping{Raw: payload}
 	if err := json.Unmarshal(payload, ping); err != nil {
 		return nil, newAPIError(http.StatusOK, "The API returned an unexpected ping response")
+	}
+	if skew := ping.ClockSkewSeconds; skew > clockSkewWarnSeconds || skew < -clockSkewWarnSeconds {
+		c.warn(ctx, fmt.Sprintf("dominaite-go: clock skew is %d s; requests fail at 300 s. Sync this server's clock.", skew))
 	}
 
 	return ping, nil
@@ -515,6 +522,8 @@ func (c *Client) CreateCheckoutSessionWithRetry(ctx context.Context, params Crea
 		if attempt == attempts-1 {
 			break
 		}
+		c.warn(ctx, fmt.Sprintf("dominaite-go: retrying CreateCheckoutSessionWithRetry after %s (attempt %d of %d)",
+			retryReason(err), attempt+2, attempts))
 		select {
 		case <-ctx.Done():
 			return nil, newTransportError("Retrying was cancelled: "+ctx.Err().Error(), ctx.Err())
@@ -1174,11 +1183,17 @@ func (c *Client) sendQuery(ctx context.Context, method, path, query, body, idemp
 		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 
+	started := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		c.debugLine(ctx, method, path, "error", nil, idempotencyKey, started)
 		return nil, newTransportError("Could not reach the Dominaite API: "+err.Error(), err)
 	}
 	defer resp.Body.Close()
+	// Runs after the body is read, so the time covers the whole response.
+	defer c.debugLine(ctx, method, path, strconv.Itoa(resp.StatusCode), resp.Header, idempotencyKey, started)
+	// Every status carries it, errors included.
+	c.readNotice(ctx, resp.Header)
 
 	// The client does not follow redirects, so a 3xx arrives here as the final
 	// response. The Dominaite API never emits one: it means a proxy, a captive
