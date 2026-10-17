@@ -94,6 +94,19 @@ func TestEveryResultCarriesTheRequestID(t *testing.T) {
 			}
 		}
 	})
+	t.Run("transaction page and items", func(t *testing.T) {
+		server, _ := newTestServer(t, withRequestIDHeader(dataReply(http.StatusOK, testTransactionPage(nil)), "req-3"))
+		page, err := newTestClient(t, server.URL).ListTransactions(context.Background(),
+			ListTransactionsParams{From: "2026-10-01T00:00:00Z", To: "2026-10-08T00:00:00Z"})
+		if err != nil || len(page.Items) != 2 || page.RequestID != "req-3" {
+			t.Fatalf("ListTransactions: %+v, %v", page, err)
+		}
+		for i, item := range page.Items {
+			if item.RequestID != "req-3" {
+				t.Errorf("Items[%d].RequestID = %q", i, item.RequestID)
+			}
+		}
+	})
 }
 
 func TestEveryErrorCarriesTheRequestID(t *testing.T) {

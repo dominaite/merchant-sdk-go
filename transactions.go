@@ -95,6 +95,11 @@ type Transaction struct {
 	// dashboard shows. Empty until the money is paid out.
 	PayoutID string `json:"payoutId,omitempty"`
 
+	// RequestID is the API's id of the call that read this page, the same as
+	// TransactionList.RequestID. Quote it to support. Empty when the API sent
+	// none.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed item, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
 }
@@ -183,7 +188,10 @@ func (c *Client) ListTransactions(ctx context.Context, params ListTransactionsPa
 		if json.Unmarshal(reply.data, &page) != nil {
 			return nil, reply.apiError("The API returned an unexpected transaction page")
 		}
-		items, err := decodeItems(page.Items, func(item *Transaction, raw json.RawMessage) { item.Raw = raw })
+		items, err := decodeItems(page.Items, func(item *Transaction, raw json.RawMessage) {
+			item.Raw = raw
+			item.RequestID = reply.requestID
+		})
 		if err != nil {
 			return nil, reply.apiError("The API returned an unexpected transaction in the page")
 		}
