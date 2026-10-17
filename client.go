@@ -8,7 +8,11 @@
 // Keep your API secret on the server. Never ship it to a browser, never commit
 // it, never log it.
 //
-//	client, err := dominaite.New(os.Getenv("DOMINAITE_KEY_ID"), os.Getenv("DOMINAITE_SECRET"))
+//	client, err := dominaite.New(
+//		os.Getenv("DOMINAITE_KEY_ID"),
+//		os.Getenv("DOMINAITE_SECRET"),
+//		dominaite.WithBaseURL(dominaite.SandboxBaseURL), // required
+//	)
 //	if err != nil {
 //		return err
 //	}
@@ -32,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -43,8 +48,11 @@ import (
 )
 
 const (
-	// DefaultBaseURL is the production merchant API.
-	DefaultBaseURL = "https://api.dominaite.com/payments"
+	// SandboxBaseURL is the sandbox merchant API. Use it with your sandbox keys.
+	SandboxBaseURL = "https://api.staging.dominaite.com/payments"
+
+	// ProductionBaseURL is the production merchant API. Use it with your live keys.
+	ProductionBaseURL = "https://api.dominaite.com/payments"
 
 	// SessionsPath is the canonical path that gets signed. POST creates a
 	// session; GET SessionsPath + "/{transactionId}" reads its status.
@@ -88,7 +96,7 @@ const (
 	IntegrationContractPath = "/merchant-api/integration/contract"
 
 	// Version is this SDK's version, reported in the User-Agent.
-	Version = "0.5.2"
+	Version = "0.6.0"
 
 	defaultTimeout = 45 * time.Second // serverless cold starts hit 10+s on dev; 15s was a coin flip
 
@@ -122,6 +130,9 @@ type Client struct {
 	httpClient *http.Client
 	userAgent  string
 	now        func() time.Time
+	optionErr  error
+	logger     *slog.Logger // nil: warnings go to slog.Default(), no debug lines
+	notices    *noticeSet
 }
 
 // String keeps the secret out of your logs. Printing a Client with %v, %+v or
@@ -151,9 +162,10 @@ func redactSecret(secret string) string {
 // Option configures a Client. Pass options to New.
 type Option func(*Client)
 
-// WithBaseURL points the client at a non-production environment. Trailing
-// slashes are trimmed. Empty values are ignored, so you can pass an unset
-// environment variable straight through and still get production.
+// WithBaseURL sets the API the client calls: SandboxBaseURL, ProductionBaseURL
+// or your own value. It is required: New returns a *ValidationError without it,
+// and when the value is empty or whitespace. Whitespace and trailing slashes are
+// trimmed.
 //
 // The URL must be https://. Plain http:// is accepted only for localhost,
 // 127.0.0.1 and ::1, so a local mock server still works; anything else is
@@ -161,9 +173,7 @@ type Option func(*Client)
 // signature, key id and the whole request body travel in clear text.
 func WithBaseURL(baseURL string) Option {
 	return func(c *Client) {
-		if trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/"); trimmed != "" {
-			c.baseURL = trimmed
-		}
+		c.baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	}
 }
 
@@ -193,20 +203,49 @@ func WithTimeout(timeout time.Duration) Option {
 }
 
 // WithUserAgent appends your own identifier to the SDK's User-Agent, which helps
-// when Dominaite support reads the access logs for your integration.
+// when Dominaite support reads the access logs for your integration. The SDK
+// sends "dominaite-go/<version> (go <go version>) <your suffix>". A suffix with a
+// control character makes New return a *ValidationError.
 func WithUserAgent(userAgent string) Option {
 	return func(c *Client) {
-		if trimmed := strings.TrimSpace(userAgent); trimmed != "" {
+		trimmed := strings.TrimSpace(userAgent)
+		if hasControlChar(trimmed) {
+			c.optionErr = newValidationError("userAgent must not contain control characters")
+			return
+		}
+		if trimmed != "" {
 			c.userAgent = c.userAgent + " " + trimmed
 		}
 	}
 }
 
+// sdkUserAgent is the User-Agent without a caller suffix:
+// dominaite-go/<version> (go <go version>). No operating system.
+func sdkUserAgent() string {
+	goVersion := strings.TrimPrefix(runtime.Version(), "go")
+	// A development toolchain reports "devel go1.x-<hash> <date>"; keep one token.
+	if fields := strings.Fields(goVersion); len(fields) > 0 {
+		goVersion = fields[0]
+	}
+	return fmt.Sprintf("dominaite-go/%s (go %s)", Version, goVersion)
+}
+
+// hasControlChar reports whether s holds a byte below 0x20 or 0x7F, which
+// would let a header value break out of its line.
+func hasControlChar(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 // New builds a client from your API key id (dmk_...) and secret (dms_...), both
 // from the dashboard's Website integration tab. It returns a *ValidationError
 // when either credential has the wrong prefix, which catches a swapped key id
-// and secret before anything is sent, and when WithBaseURL was given a
-// non-https URL outside loopback.
+// and secret before anything is sent. It also returns one when WithBaseURL is
+// missing, empty or whitespace, or is not https:// outside loopback.
 func New(keyID, secret string, opts ...Option) (*Client, error) {
 	if !strings.HasPrefix(keyID, "dmk_") {
 		return nil, newValidationError("keyId must start with dmk_")
@@ -218,15 +257,24 @@ func New(keyID, secret string, opts ...Option) (*Client, error) {
 	client := &Client{
 		keyID:      keyID,
 		secret:     secret,
-		baseURL:    DefaultBaseURL,
 		httpClient: &http.Client{Timeout: defaultTimeout},
-		userAgent:  fmt.Sprintf("dominaite-go/%s (%s)", Version, runtime.Version()),
+		userAgent:  sdkUserAgent(),
 		now:        time.Now,
+		notices:    &noticeSet{},
 	}
 	for _, opt := range opts {
 		opt(client)
 	}
+	if client.optionErr != nil {
+		return nil, client.optionErr
+	}
 
+	// There is no default base URL. A fallback to production would turn an unset
+	// environment variable into sandbox keys sent to production.
+	if client.baseURL == "" {
+		return nil, newValidationError("baseURL is required. Use " + SandboxBaseURL +
+			" for the sandbox or " + ProductionBaseURL + " for production.")
+	}
 	if err := validateBaseURL(client.baseURL); err != nil {
 		return nil, err
 	}
@@ -299,6 +347,9 @@ func (c *Client) Ping(ctx context.Context) (*Ping, error) {
 	ping := &Ping{Raw: payload}
 	if err := json.Unmarshal(payload, ping); err != nil {
 		return nil, newAPIError(http.StatusOK, "The API returned an unexpected ping response")
+	}
+	if skew := ping.ClockSkewSeconds; skew > clockSkewWarnSeconds || skew < -clockSkewWarnSeconds {
+		c.warn(ctx, fmt.Sprintf("dominaite-go: clock skew is %d s; requests fail at 300 s. Sync this server's clock.", skew))
 	}
 
 	return ping, nil
@@ -471,6 +522,8 @@ func (c *Client) CreateCheckoutSessionWithRetry(ctx context.Context, params Crea
 		if attempt == attempts-1 {
 			break
 		}
+		c.warn(ctx, fmt.Sprintf("dominaite-go: retrying CreateCheckoutSessionWithRetry after %s (attempt %d of %d)",
+			retryReason(err), attempt+2, attempts))
 		select {
 		case <-ctx.Done():
 			return nil, newTransportError("Retrying was cancelled: "+ctx.Err().Error(), ctx.Err())
@@ -1130,11 +1183,17 @@ func (c *Client) sendQuery(ctx context.Context, method, path, query, body, idemp
 		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 
+	started := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		c.debugLine(ctx, method, path, "error", nil, idempotencyKey, started)
 		return nil, newTransportError("Could not reach the Dominaite API: "+err.Error(), err)
 	}
 	defer resp.Body.Close()
+	// Runs after the body is read, so the time covers the whole response.
+	defer c.debugLine(ctx, method, path, strconv.Itoa(resp.StatusCode), resp.Header, idempotencyKey, started)
+	// Every status carries it, errors included.
+	c.readNotice(ctx, resp.Header)
 
 	// The client does not follow redirects, so a 3xx arrives here as the final
 	// response. The Dominaite API never emits one: it means a proxy, a captive

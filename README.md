@@ -93,10 +93,8 @@ Set your credentials and the environment you are pointing at:
 export DOMINAITE_KEY_ID=dmk_...      # Website integration tab
 export DOMINAITE_SECRET=dms_...      # shown once when you generated the key
 export DOMINAITE_WEBHOOK_SECRET=whsec_...  # shown once when you created the endpoint
-# Production needs no DOMINAITE_BASE_URL - the SDK defaults to
-# https://api.dominaite.com/payments
-# For a test environment, set it to that environment's base URL:
-# export DOMINAITE_BASE_URL=https://...
+# Required. The sandbox, or https://api.dominaite.com/payments for production:
+export DOMINAITE_BASE_URL=https://api.staging.dominaite.com/payments
 ```
 
 Ping before your first mint. It is one signed GET that creates nothing, so anything that
@@ -106,7 +104,7 @@ fails here is your credentials, your signing or your clock:
 client, err := dominaite.New(
 	os.Getenv("DOMINAITE_KEY_ID"),
 	os.Getenv("DOMINAITE_SECRET"),
-	dominaite.WithBaseURL(os.Getenv("DOMINAITE_BASE_URL")), // no-op in production
+	dominaite.WithBaseURL(os.Getenv("DOMINAITE_BASE_URL")), // required
 )
 if err != nil {
 	log.Fatal(err)
@@ -142,7 +140,7 @@ func main() {
 	client, err := dominaite.New(
 		os.Getenv("DOMINAITE_KEY_ID"),
 		os.Getenv("DOMINAITE_SECRET"),
-		dominaite.WithBaseURL(os.Getenv("DOMINAITE_BASE_URL")), // ignored when empty
+		dominaite.WithBaseURL(os.Getenv("DOMINAITE_BASE_URL")), // required
 	)
 	if err != nil {
 		panic(err)
@@ -536,7 +534,7 @@ key. From code, the webhook endpoint routes need a
 [reporting key](#what-we-switch-on-for-your-account) with the `webhooks:manage` scope.
 
 ```go
-reporting, err := dominaite.New(reportingKeyID, reportingSecret)
+reporting, err := dominaite.New(reportingKeyID, reportingSecret, dominaite.WithBaseURL(baseURL))
 endpoint, err := reporting.CreateWebhookEndpoint(ctx, dominaite.CreateWebhookEndpointParams{
 	URL:            "https://shop.example/hooks/dominaite",
 	Events:         []string{dominaite.EventPaymentSucceeded, dominaite.EventPaymentRefunded},
@@ -609,17 +607,55 @@ event, err := dominaite.VerifyWebhook(
 
 ## Client options
 
-`dominaite.New(keyID, secret, opts...)` takes functional options:
+`dominaite.New(keyID, secret, opts...)` takes functional options. `WithBaseURL` is required:
 
 | Option | What |
 |---|---|
-| `WithBaseURL(url)` | Point at a non-production environment. Empty values are ignored, so an unset env var still gives you production. Must be `https://`; plain `http://` is accepted only for `localhost`, `127.0.0.1` and `::1`, and `New` returns a `*ValidationError` for anything else. |
+| `WithBaseURL(url)` | Required. `dominaite.SandboxBaseURL` or `dominaite.ProductionBaseURL`, or your own value. Without it, or with an empty or whitespace value, `New` returns a `*ValidationError`. Must be `https://`; plain `http://` is accepted only for `localhost`, `127.0.0.1` and `::1`, and `New` returns a `*ValidationError` for anything else. |
 | `WithTimeout(d)` | Per-request timeout on the default HTTP client. Defaults to 45s (serverless cold starts can take 10+s). |
 | `WithHTTPClient(c)` | Your own `*http.Client`: proxy-aware transport, custom TLS, a test double. Replaces `WithTimeout`. |
-| `WithUserAgent(s)` | Appends your identifier to the SDK's User-Agent, which helps when support reads the access logs. |
+| `WithUserAgent(s)` | Appends your identifier to the SDK's User-Agent, which helps when support reads the access logs. The SDK sends `dominaite-go/<version> (go <go version>) <your suffix>`. A suffix with a control character makes `New` return a `*ValidationError`. |
+| `WithLogger(l)` | A `*slog.Logger` for the SDK's warnings and debug lines. See [Logging and warnings](#logging-and-warnings). |
+
+`DefaultBaseURL` is removed in 0.6.0. Use `ProductionBaseURL`.
 
 Every call takes a `context.Context`. A context deadline shorter than the client timeout wins,
 and cancelling the context returns a `*TransportError` wrapping `context.Canceled`.
+
+## Logging and warnings
+
+The SDK logs warnings at `slog.LevelWarn`. Without `WithLogger` they go to `slog.Default()`.
+It warns about three things:
+
+- The API sends a `Dominaite-Sdk-Notice` response header when your SDK version is deprecated.
+  The SDK warns once for each distinct value, for example
+  `dominaite-go 0.6.0 is deprecated; upgrade to 0.7.0 (sunset 2027-01-31). https://...`.
+  Without the header, nothing happens.
+- `CreateCheckoutSessionWithRetry` warns before each retry, with the error code or type.
+- `Ping` warns when the clock skew is above 60 seconds. Requests fail at 300.
+
+The debug log is off by default. Pass your own logger with `WithLogger`, and let its handler
+show `slog.LevelDebug`. The SDK then logs one line per request:
+
+```
+dominaite-go: POST /merchant-api/checkout/sessions 201 142ms request_id=... idempotency_key=...
+```
+
+The line holds the method, the signed path, the status (`error` when the network failed), the
+time in milliseconds, the `Dominaite-Request-Id` response header and the idempotency key you
+sent. Give the request id to support when you ask about a call. The default logger never gets
+debug lines.
+
+No warning and no debug line holds your secret, the signature, the cashier token, a query
+string or a request or response body. A handler that panics does not fail the request.
+
+```go
+logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+client, err := dominaite.New(keyID, secret,
+	dominaite.WithBaseURL(dominaite.SandboxBaseURL),
+	dominaite.WithLogger(logger),
+)
+```
 
 ## Amounts are minor units
 
@@ -1176,7 +1212,7 @@ saved-card charges, subscription charges and verify-only sessions. It needs a
 [reporting key](#what-we-switch-on-for-your-account) with the `transactions:read` scope.
 
 ```go
-reporting, err := dominaite.New(reportingKeyID, reportingSecret)
+reporting, err := dominaite.New(reportingKeyID, reportingSecret, dominaite.WithBaseURL(baseURL))
 params := dominaite.ListTransactionsParams{
 	From: "2026-10-01T00:00:00Z", // inclusive
 	To:   "2026-11-01T00:00:00Z", // exclusive, at most 31 days after From

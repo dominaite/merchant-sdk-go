@@ -728,13 +728,13 @@ func TestRequiredParams(t *testing.T) {
 }
 
 func TestCredentialsArePrefixChecked(t *testing.T) {
-	if _, err := New("nope", vector.Secret); err == nil {
+	if _, err := New("nope", vector.Secret, WithBaseURL(SandboxBaseURL)); err == nil {
 		t.Fatal("a key id without the dmk_ prefix must be rejected")
 	}
-	if _, err := New(testKeyID, "nope"); err == nil {
+	if _, err := New(testKeyID, "nope", WithBaseURL(SandboxBaseURL)); err == nil {
 		t.Fatal("a secret without the dms_ prefix must be rejected")
 	}
-	if _, err := New(testKeyID, vector.Secret); err != nil {
+	if _, err := New(testKeyID, vector.Secret, WithBaseURL(SandboxBaseURL)); err != nil {
 		t.Fatalf("valid credentials rejected: %v", err)
 	}
 }
@@ -774,21 +774,68 @@ func TestEverySDKErrorMatchesTheCatchAll(t *testing.T) {
 	}
 }
 
-func TestBaseURLDefaultsToProduction(t *testing.T) {
-	client, err := New(testKeyID, vector.Secret, WithBaseURL(""))
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if client.baseURL != DefaultBaseURL {
-		t.Fatalf("baseURL = %s, want %s", client.baseURL, DefaultBaseURL)
-	}
+const baseURLRequired = "baseURL is required. Use https://api.staging.dominaite.com/payments" +
+	" for the sandbox or https://api.dominaite.com/payments for production."
 
-	trimmed, err := New(testKeyID, vector.Secret, WithBaseURL("https://example.test/api/"))
+func TestBaseURLIsRequired(t *testing.T) {
+	cases := map[string][]Option{
+		"no WithBaseURL": nil,
+		"empty":          {WithBaseURL("")},
+		"whitespace":     {WithBaseURL(" \t\n")},
+		"only slashes":   {WithBaseURL(" // ")},
+		"blank replaces": {WithBaseURL(SandboxBaseURL), WithBaseURL("")},
+	}
+	for name, opts := range cases {
+		t.Run(name, func(t *testing.T) {
+			client, err := New(testKeyID, vector.Secret, opts...)
+			var validationErr *ValidationError
+			if !errors.As(err, &validationErr) || client != nil {
+				t.Fatalf("New = %v, %v, want nil, *ValidationError", client, err)
+			}
+			if validationErr.Message != baseURLRequired {
+				t.Fatalf("message = %q, want %q", validationErr.Message, baseURLRequired)
+			}
+		})
+	}
+}
+
+func TestNamedBaseURLs(t *testing.T) {
+	if SandboxBaseURL != "https://api.staging.dominaite.com/payments" {
+		t.Fatalf("SandboxBaseURL = %q", SandboxBaseURL)
+	}
+	if ProductionBaseURL != "https://api.dominaite.com/payments" {
+		t.Fatalf("ProductionBaseURL = %q", ProductionBaseURL)
+	}
+	for _, baseURL := range []string{SandboxBaseURL, ProductionBaseURL} {
+		client, err := New(testKeyID, vector.Secret, WithBaseURL(baseURL))
+		if err != nil {
+			t.Fatalf("New(%q): %v", baseURL, err)
+		}
+		if client.baseURL != baseURL {
+			t.Fatalf("baseURL = %s, want %s", client.baseURL, baseURL)
+		}
+	}
+}
+
+func TestExplicitBaseURLIsTrimmedAndUsed(t *testing.T) {
+	trimmed, err := New(testKeyID, vector.Secret, WithBaseURL("  https://example.test/api/  "))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	if trimmed.baseURL != "https://example.test/api" {
-		t.Fatalf("trailing slash not trimmed: %s", trimmed.baseURL)
+		t.Fatalf("whitespace or trailing slash not trimmed: %q", trimmed.baseURL)
+	}
+
+	server, calls := newTestServer(t, successReply())
+	client, err := New(testKeyID, vector.Secret, WithBaseURL(server.URL+"/"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := client.CreateCheckoutSession(context.Background(), testParams()); err != nil {
+		t.Fatalf("CreateCheckoutSession: %v", err)
+	}
+	if got := len(calls()); got != 1 {
+		t.Fatalf("calls = %d, want 1 on the explicit base URL", got)
 	}
 }
 

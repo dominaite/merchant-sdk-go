@@ -3,10 +3,10 @@
 //
 //	export DOMINAITE_KEY_ID=dmk_...
 //	export DOMINAITE_SECRET=dms_...
-//	export DOMINAITE_BASE_URL=https://...   # a test environment only
+//	export DOMINAITE_BASE_URL=https://api.staging.dominaite.com/payments   # required
 //	go run ./examples/create-session
 //
-// Leave DOMINAITE_BASE_URL unset to hit production.
+// Use https://api.dominaite.com/payments for production.
 package main
 
 import (
@@ -30,7 +30,7 @@ func run() error {
 	client, err := dominaite.New(
 		os.Getenv("DOMINAITE_KEY_ID"),
 		os.Getenv("DOMINAITE_SECRET"),
-		dominaite.WithBaseURL(os.Getenv("DOMINAITE_BASE_URL")), // ignored when empty
+		dominaite.WithBaseURL(os.Getenv("DOMINAITE_BASE_URL")), // required
 	)
 	if err != nil {
 		return err

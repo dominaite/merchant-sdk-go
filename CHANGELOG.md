@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.6.0
+
+### Breaking
+
+- The base URL is required. The client no longer falls back to production when you leave it
+  out, so an unset environment variable cannot send sandbox credentials to production.
+  `New` returns a `*ValidationError` when `WithBaseURL` is missing, empty or whitespace. Pass
+  `dominaite.SandboxBaseURL` (`https://api.staging.dominaite.com/payments`) or
+  `dominaite.ProductionBaseURL` (`https://api.dominaite.com/payments`), or your own value.
+- `DefaultBaseURL` is removed. Use `ProductionBaseURL`.
+
+### Added
+
+- The User-Agent is now `dominaite-go/<version> (go <go version>)`, then the `WithUserAgent`
+  suffix. 0.5.x sent `(go1.x.y)`. A suffix with a control character makes `New` return a
+  `*ValidationError`.
+- `WithLogger(*slog.Logger)`: the SDK's warnings, at `slog.LevelWarn`. Without it they go to
+  `slog.Default()`. The SDK warns once per distinct `Dominaite-Sdk-Notice` response header
+  (sent when your SDK version is deprecated), before each retry in
+  `CreateCheckoutSessionWithRetry`, and when `Ping` reports a clock skew above 60 seconds.
+- Debug log, off by default: a logger passed with `WithLogger` gets one line per request at
+  `slog.LevelDebug`, with the method, path, status, time in ms, the `Dominaite-Request-Id`
+  response header and the idempotency key. No line holds the secret, the signature, the
+  cashier token, a query string or a body.
+
 ## 0.5.2
 
 ### Added
