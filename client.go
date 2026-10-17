@@ -1280,7 +1280,7 @@ func (c *Client) sendQuery(ctx context.Context, method, path, query, body, idemp
 		return nil, rateErr
 	case resp.StatusCode == http.StatusUnauthorized:
 		code := firstNonEmpty(inner.ErrorCode, envelope.Error.code(), "UNAUTHORIZED")
-		return nil, newAuthError(resp.StatusCode, code, "Authentication failed - check your key id, secret, and server clock.")
+		return nil, newAuthError(resp.StatusCode, code, unauthorizedMessage(firstNonEmpty(inner.ErrorMessage, envelope.Error.message())))
 	case resp.StatusCode == http.StatusForbidden:
 		code := firstNonEmpty(inner.ErrorCode, envelope.Error.code(), "UNAUTHORIZED")
 		return nil, newAuthError(resp.StatusCode, code, forbiddenMessage(code, firstNonEmpty(inner.ErrorMessage, envelope.Error.message())))
@@ -1294,6 +1294,17 @@ func (c *Client) sendQuery(ctx context.Context, method, path, query, body, idemp
 		err:      envelope.Error,
 		parsed:   parsedJSON,
 	}, nil
+}
+
+// unauthorizedMessage is the message of a 401: the API's own text, which
+// names what failed, then the fixed hint.
+func unauthorizedMessage(apiMessage string) string {
+	const hint = "Authentication failed - check your key id, secret, and server clock."
+	apiMessage = strings.TrimSpace(apiMessage)
+	if apiMessage == "" {
+		return hint
+	}
+	return strings.TrimRight(apiMessage, ".") + ". " + hint
 }
 
 // forbiddenMessage is the message of a 403. The clock hint is for 401 only: a

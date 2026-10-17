@@ -450,6 +450,21 @@ func TestAuthErrorFromEnvelopeErrorCode(t *testing.T) {
 	if !errors.As(err, &authErr) || authErr.ErrorCode != "IP_NOT_ALLOWED" {
 		t.Fatalf("got %v, want *AuthError with IP_NOT_ALLOWED", err)
 	}
+	// The API's own text says what failed; the fixed hint follows it.
+	want := "caller not allowlisted. Authentication failed - check your key id, secret, and server clock."
+	if authErr.Error() != want {
+		t.Fatalf("message = %q, want %q", authErr.Error(), want)
+	}
+}
+
+func TestAuthErrorWithoutAMessageKeepsTheHint(t *testing.T) {
+	server, _ := newTestServer(t, reply{Status: 401, Body: map[string]any{"success": false, "error": map[string]any{"code": "INVALID_API_KEY"}}})
+	_, err := newTestClient(t, server.URL).Ping(context.Background())
+
+	var authErr *AuthError
+	if !errors.As(err, &authErr) || authErr.Error() != "Authentication failed - check your key id, secret, and server clock." {
+		t.Fatalf("got %v, want the fixed hint", err)
+	}
 }
 
 // A rejecting 4xx must carry its machine-readable code through, so callers
