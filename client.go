@@ -1141,7 +1141,7 @@ func (r *response) rejection() error {
 // route is that route's typed error. Validation (400), authentication (401,
 // 403) and rate limiting (429) keep their generic errors on every route. A
 // 5xx is the route's error only with one of the route's own 5xx codes;
-// anything else, the middleware's INTERNAL_ERROR included, stays the
+// anything else, a 500 INTERNAL_ERROR included, stays the
 // retryable *TransportError with its code. Every other coded 4xx, a 404
 // included, is the route's error.
 func isRouteErrorStatus(status int, code string, serverCodes []string) bool {

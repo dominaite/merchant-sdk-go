@@ -17,7 +17,7 @@
   - On `ChargePaymentMethod`, a coded 404 (`PAYMENT_METHOD_NOT_FOUND`, `AGREEMENT_NOT_FOUND`)
     is a `*ChargeError`. It was an `*APIError`.
   - On `ChargePaymentMethod` and `RevokePaymentMethod`, a 5xx whose code is not one of the
-    route's own codes (for example the middleware's `INTERNAL_ERROR`) is a `*TransportError`
+    route's own codes (for example a 500 `INTERNAL_ERROR`) is a `*TransportError`
     with that code on `ErrorCode`. It was a `*ChargeError` or a `*RevokeError`.
 - `CreateCheckoutSessionWithRetry` and `RetryOptions` are deprecated. The method still works
   with its own budget, but its waits are now random (full jitter) instead of a fixed doubling,
