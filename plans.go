@@ -143,6 +143,10 @@ type Plan struct {
 	// ArchivedAt is ISO 8601 UTC, empty while the plan is active.
 	ArchivedAt string `json:"archivedAt,omitempty"`
 
+	// RequestID is the API's id of the call that returned this plan. Quote it
+	// to support. Empty when the API sent none.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed plan object, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
 }
@@ -211,11 +215,14 @@ func (c *Client) ListPlans(ctx context.Context) ([]Plan, error) {
 		return nil, reply.rejection()
 	}
 	if !reply.parsed {
-		return nil, newAPIError(reply.status, "The API returned a non-JSON response")
+		return nil, reply.apiError("The API returned a non-JSON response")
 	}
-	plans, err := decodeItems(reply.data, func(plan *Plan, raw json.RawMessage) { plan.Raw = raw })
+	plans, err := decodeItems(reply.data, func(plan *Plan, raw json.RawMessage) {
+		plan.Raw = raw
+		plan.RequestID = reply.requestID
+	})
 	if err != nil {
-		return nil, newAPIError(reply.status, "The API returned an unexpected plan list")
+		return nil, reply.apiError("The API returned an unexpected plan list")
 	}
 	return plans, nil
 }
@@ -296,8 +303,9 @@ func (r *response) plan() (*Plan, error) {
 	}
 	plan := &Plan{Raw: r.data}
 	if !r.parsed || !isJSONObject(r.data) || json.Unmarshal(r.data, plan) != nil || plan.ID == "" {
-		return nil, newAPIError(r.status, "The API returned an unexpected plan object")
+		return nil, r.apiError("The API returned an unexpected plan object")
 	}
+	plan.RequestID = r.requestID
 	return plan, nil
 }
 

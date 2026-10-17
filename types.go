@@ -227,6 +227,12 @@ type CheckoutSession struct {
 	// takes the first payment for. Empty on a one-off checkout.
 	AgreementID string `json:"agreementId,omitempty"`
 
+	// RequestID is the API's id of the call that returned this: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when the API sent
+	// neither.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed payload, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
 }
@@ -264,6 +270,12 @@ type Ping struct {
 	// value creeps toward 300, fix NTP now - requests start failing at 300.
 	ClockSkewSeconds int64 `json:"clockSkewSeconds"`
 
+	// RequestID is the API's id of the call that returned this: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when the API sent
+	// neither.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed payload, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
 }
@@ -278,6 +290,12 @@ type IntegrationContract struct {
 	// WebhookEventCatalog is the payment.* webhook event types. The recurring
 	// and verification event types are in their own sections of Raw.
 	WebhookEventCatalog []string `json:"webhookEventCatalog"`
+
+	// RequestID is the API's id of the call that returned this: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when the API sent
+	// neither.
+	RequestID string `json:"-"`
 
 	// Raw is the whole contract as the API sent it.
 	Raw json.RawMessage `json:"-"`
@@ -441,6 +459,12 @@ type CheckoutStatus struct {
 	// payment, which sends payment.* events only, and before the first
 	// charge.* event.
 	Sequence int64 `json:"sequence,omitempty"`
+
+	// RequestID is the API's id of the call that returned this: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when the API sent
+	// neither.
+	RequestID string `json:"-"`
 
 	// Raw is the unparsed payload, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
@@ -658,6 +682,12 @@ type PaymentMethodCharge struct {
 	// the live value.
 	Sequence int64 `json:"sequence,omitempty"`
 
+	// RequestID is the API's id of the call that returned this: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when the API sent
+	// neither.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed charge object, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
 }
@@ -758,6 +788,12 @@ type Refund struct {
 	// failed. Empty before that.
 	CompletedAt string `json:"completedAt,omitempty"`
 
+	// RequestID is the API's id of the call that returned this: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when the API sent
+	// neither.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed refund object, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
 }
@@ -781,6 +817,12 @@ type RefundList struct {
 	// processing, then succeeded and failed, newest first within each group.
 	// Empty when there are none.
 	Refunds []Refund `json:"refunds"`
+
+	// RequestID is the API's id of the call that returned this: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when the API sent
+	// neither.
+	RequestID string `json:"-"`
 
 	// Raw is the unparsed refund list, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`

@@ -49,6 +49,7 @@ type recordedCall struct {
 type reply struct {
 	Status int
 	Body   any
+	Header map[string]string
 }
 
 // newTestServer serves replies in order, repeating the last one once exhausted,
@@ -83,6 +84,9 @@ func newTestServer(t *testing.T, replies ...reply) (*httptest.Server, func() []r
 			status = http.StatusOK
 		}
 		w.Header().Set("Content-Type", "application/json")
+		for name, value := range next.Header {
+			w.Header().Set(name, value)
+		}
 		w.WriteHeader(status)
 		switch payload := next.Body.(type) {
 		case string:

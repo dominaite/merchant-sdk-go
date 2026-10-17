@@ -162,6 +162,10 @@ type Agreement struct {
 	// CancelledAt is ISO 8601 UTC, empty unless cancelled.
 	CancelledAt string `json:"cancelledAt,omitempty"`
 
+	// RequestID is the API's id of the call that returned this agreement.
+	// Quote it to support. Empty when the API sent none.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed agreement object, for fields this struct does not
 	// model yet.
 	Raw json.RawMessage `json:"-"`
@@ -262,7 +266,8 @@ func (r *response) agreement() (*Agreement, error) {
 	}
 	agreement := &Agreement{Raw: r.data}
 	if !r.parsed || !isJSONObject(r.data) || json.Unmarshal(r.data, agreement) != nil || agreement.ID == "" {
-		return nil, newAPIError(r.status, "The API returned an unexpected agreement object")
+		return nil, r.apiError("The API returned an unexpected agreement object")
 	}
+	agreement.RequestID = r.requestID
 	return agreement, nil
 }

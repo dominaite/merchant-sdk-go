@@ -68,6 +68,10 @@ type WebhookEndpoint struct {
 	// String keeps it out of %v.
 	Secret string `json:"-"`
 
+	// RequestID is the API's id of the call that returned this endpoint.
+	// Quote it to support. Empty when the API sent none.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed endpoint object, for fields this struct does not
 	// model yet. On the first answer to CreateWebhookEndpoint it holds the
 	// secret too: never log it.
@@ -138,8 +142,9 @@ func (c *Client) CreateWebhookEndpoint(ctx context.Context, params CreateWebhook
 	}
 	endpoint, ok := decodeWebhookEndpoint(reply.data)
 	if !reply.parsed || !ok {
-		return nil, newAPIError(reply.status, "The API returned an unexpected webhook endpoint object")
+		return nil, reply.apiError("The API returned an unexpected webhook endpoint object")
 	}
+	endpoint.RequestID = reply.requestID
 	return endpoint, nil
 }
 
@@ -159,11 +164,14 @@ func (c *Client) ListWebhookEndpoints(ctx context.Context) ([]WebhookEndpoint, e
 		return nil, reply.rejection()
 	}
 	if !reply.parsed {
-		return nil, newAPIError(reply.status, "The API returned a non-JSON response")
+		return nil, reply.apiError("The API returned a non-JSON response")
 	}
-	endpoints, err := decodeItems(reply.data, func(endpoint *WebhookEndpoint, raw json.RawMessage) { endpoint.Raw = raw })
+	endpoints, err := decodeItems(reply.data, func(endpoint *WebhookEndpoint, raw json.RawMessage) {
+		endpoint.Raw = raw
+		endpoint.RequestID = reply.requestID
+	})
 	if err != nil {
-		return nil, newAPIError(reply.status, "The API returned an unexpected webhook endpoint list")
+		return nil, reply.apiError("The API returned an unexpected webhook endpoint list")
 	}
 	return endpoints, nil
 }

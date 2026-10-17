@@ -26,9 +26,16 @@ type Error interface {
 	sdkError()
 }
 
-// baseError carries the message and the sealing method shared by every SDK error.
+// baseError carries the message, the request id and the sealing method
+// shared by every SDK error.
 type baseError struct {
 	Message string
+	// RequestID is the API's id of the call that failed: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when no response
+	// arrived, when the API sent neither, and on a *ValidationError or a
+	// *WebhookVerificationError.
+	RequestID string
 }
 
 func (e baseError) Error() string { return e.Message }
