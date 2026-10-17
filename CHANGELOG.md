@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.7.0 (unreleased)
+
+### Breaking
+
+- The client retries failed calls on its own, 2 times by default. Every GET and every POST
+  that carries an idempotency key is covered, except `CreateWebhookEndpoint`. Only a
+  `*TransportError`, `PAYMENT_PROCESSING_UNAVAILABLE` and the charge route's 503
+  `PAYMENT_METHOD_CHARGES_DISABLED` are retried. Each attempt sends the same idempotency key
+  and body. Pass `WithMaxRetries(0)` to keep the 0.6.0 behaviour of one attempt per call.
+- The timeout is per attempt. With retries, one call can take up to (maxRetries + 1) x the
+  timeout plus the waits between attempts: 3 x 45s plus up to 1.5s at the defaults. Put a
+  deadline on the context when a caller waits on the answer.
+- Some failures now arrive as a different error type. Check the order and the targets of your
+  `errors.As` checks:
+  - On `ChargePaymentMethod`, a coded 404 (`PAYMENT_METHOD_NOT_FOUND`, `AGREEMENT_NOT_FOUND`)
+    is a `*ChargeError`. It was an `*APIError`.
+  - On `ChargePaymentMethod` and `RevokePaymentMethod`, a 5xx whose code is not one of the
+    route's own codes (for example the middleware's `INTERNAL_ERROR`) is a `*TransportError`
+    with that code on `ErrorCode`. It was a `*ChargeError` or a `*RevokeError`.
+- `CreateCheckoutSessionWithRetry` and `RetryOptions` are deprecated. The method still works
+  with its own budget, but its waits are now random (full jitter) instead of a fixed doubling,
+  and `Attempts` 0 now uses the client's budget.
+
+### Added
+
+- `RequestID` on every result and on every error built from a response. It is the
+  `Dominaite-Request-Id` header, or `metadata.requestId` in the body when the header is
+  absent. Production sends only the body field. The debug line logs the same id.
+- `WithMaxRetries(n)`. The wait before retry n (0 for the first) is a random time between 0
+  and 500ms x 2^n, capped at 8 seconds. A 429 is never retried and keeps `RetryAfterSeconds`.
+  Each retry logs a warning.
+- `TransportError.HTTPStatus`, `ErrorCode` and `Raw` for a 5xx.
+- Typed webhook data. `WebhookData.PaymentMethod` and `WalletType` on `payment.*` and
+  `verification.*` events. `WebhookData.Charge` (`*ChargeWebhookData`) on `charge.*` events
+  and `WebhookData.Agreement` (`*AgreementWebhookData`) on `agreement.*` events, with the
+  `ChargeOutcome*` constants.
+- Error code lists: `AuthenticationErrorCodes`, `IdempotencyErrorCodes`,
+  `TransientErrorCodes`, `ValidationErrorCodes`, `SessionRefusalErrorCodes`,
+  `RecurringErrorCodes` and `WebhookErrorCodes`, with their constants. `ChargeErrorCodes` now
+  holds every code the charge route answers, the agreement codes included.
+
+### Fixed
+
+- A payment method id with uppercase letters is sent and signed in lowercase, as the API
+  signs it. Before, such a call could fail with `INVALID_SIGNATURE`.
+- A 401 keeps the API's own message, followed by the SDK's hint.
+
 ## 0.6.0
 
 ### Breaking

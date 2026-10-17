@@ -361,6 +361,8 @@ event.Data.TransactionID
 event.Data.OrderReference    // your own order reference: match deliveries to orders on it
 event.Data.OrderID           // hosted checkout order id; empty on refunds and cancellations
 event.Data.Description       // what you sent on create session; empty when none
+event.Data.PaymentMethod     // payment.* and verification.*: one of the PaymentMethod* constants; empty when null
+event.Data.WalletType        // which wallet when PaymentMethod is "wallet", one of the WalletType* constants
 event.Data.PaymentMethodBrand  // lower-cased card brand once a card was tried; empty otherwise
 event.Data.PaymentMethodLast4  // last four card digits, same conditions as the brand
 event.Data.Status            // wire status, one of the Status* constants
@@ -376,6 +378,8 @@ event.Data.StoredPaymentMethod  // *StoredPaymentMethod on payment.* events; nil
 event.Data.VerifyOnly        // true on every event of a verify-only session
 event.Data.DeclineClass      // on payment.failed, verification.failed and charge.*; can be empty
 event.Data.Sequence          // per-object order on agreement.* and charge.*; 0 when absent
+event.Data.Charge            // *ChargeWebhookData on charge.* events; nil on every other event
+event.Data.Agreement         // *AgreementWebhookData on agreement.* events; nil on every other event
 event.Data.Raw               // the data object, for fields not modelled above
 event.Raw                    // the verified bytes, for anything not modelled above
 ```
@@ -407,7 +411,21 @@ It can also be `nil` when a card **was** saved: on server-to-server sales that s
 synchronously and on sales settled by the background sweep, the card is stored after the
 approval was announced. `GetStatus` is the source of truth, so on a `SaveCard` session whose
 event has `StoredPaymentMethod == nil`, read the status to pick the card up. `charge.*` events
-carry `storedPaymentMethodId` instead (read it from `Data.Raw`).
+carry the stored payment method id instead, on `Data.Charge.StoredPaymentMethodID`.
+
+`PaymentMethod` says how the payer paid on `payment.*` and `verification.*` events, one of
+`PaymentMethodCategories`. `WalletType` is set when it is `wallet`. On a `charge.*` event
+`paymentMethod` is an object instead, so `Data.PaymentMethod` stays empty there and the card is
+on `Data.Charge.PaymentMethod`.
+
+`Data.Charge` types the `charge.*` payload: `ChargeID`, `TransactionID`,
+`StoredPaymentMethodID`, `AgreementID`, `Outcome` (one of the `ChargeOutcome*` constants),
+`PeriodNumber` and `AttemptNumber` (pointers, nil on a one-off charge), `Amount`, `Currency`,
+`PaymentMethod` (brand and last four, nil when unknown), `DeclineClass`, `DeclineCode`,
+`NextAttemptAt`, `NextChargeAt` and `Sequence`. `Data.Agreement` types the `agreement.*`
+payload: `ID`, `PlanID`, `Status`, `PreviousStatus`, the amount and interval, `NextChargeAt`,
+`ActivatedAt`, `CancelledAt`, `Version` and `Sequence`. Both keep their own `Raw`. A null on the
+wire reads as an empty string or a nil pointer.
 
 `DeclineClass` is one of `DeclineClasses` on `payment.failed`, `verification.failed`,
 `charge.failed` and `charge.retrying`. It can be empty, for example when nobody declined the
@@ -465,28 +483,17 @@ The object is:
 | `charge.*` placed by the platform for an agreement | the agreement period, `data.agreementId` + `data.periodNumber` |
 | `charge.*` for a one-off charge you initiated | `data.chargeId` |
 
-This SDK does not model the agreement and charge payloads yet, so read the key from
-`event.Data.Raw`:
+Read the key from the typed payload:
 
 ```go
-var obj struct {
-	ID           string `json:"id"`
-	AgreementID  string `json:"agreementId"`
-	PeriodNumber int    `json:"periodNumber"`
-	ChargeID     string `json:"chargeId"`
-}
-if err := json.Unmarshal(event.Data.Raw, &obj); err != nil {
-	return err
-}
-
 var key string
 switch {
-case strings.HasPrefix(event.Type, "agreement."):
-	key = obj.ID
-case obj.AgreementID != "":
-	key = fmt.Sprintf("%s/%d", obj.AgreementID, obj.PeriodNumber)
-default:
-	key = obj.ChargeID
+case event.Data.Agreement != nil:
+	key = event.Data.Agreement.ID
+case event.Data.Charge != nil && event.Data.Charge.AgreementID != "" && event.Data.Charge.PeriodNumber != nil:
+	key = fmt.Sprintf("%s/%d", event.Data.Charge.AgreementID, *event.Data.Charge.PeriodNumber)
+case event.Data.Charge != nil:
+	key = event.Data.Charge.ChargeID
 }
 
 // In the same transaction as the work itself:
@@ -616,11 +623,14 @@ event, err := dominaite.VerifyWebhook(
 | `WithHTTPClient(c)` | Your own `*http.Client`: proxy-aware transport, custom TLS, a test double. Replaces `WithTimeout`. |
 | `WithUserAgent(s)` | Appends your identifier to the SDK's User-Agent, which helps when support reads the access logs. The SDK sends `dominaite-go/<version> (go <go version>) <your suffix>`. A suffix with a control character makes `New` return a `*ValidationError`. |
 | `WithLogger(l)` | A `*slog.Logger` for the SDK's warnings and debug lines. See [Logging and warnings](#logging-and-warnings). |
+| `WithMaxRetries(n)` | How many times the client retries a failed call after the first attempt. Defaults to 2; 0 turns retries off. A negative value makes `New` return a `*ValidationError`. See [Automatic retries](#automatic-retries). |
 
 `DefaultBaseURL` is removed in 0.6.0. Use `ProductionBaseURL`.
 
 Every call takes a `context.Context`. A context deadline shorter than the client timeout wins,
-and cancelling the context returns a `*TransportError` wrapping `context.Canceled`.
+and cancelling the context returns a `*TransportError` wrapping `context.Canceled`. The timeout
+applies to each attempt, so with retries one call can take longer than the timeout; see
+[Automatic retries](#automatic-retries).
 
 ## Logging and warnings
 
@@ -631,7 +641,8 @@ It warns about three things:
   The SDK warns once for each distinct value, for example
   `dominaite-go 0.6.0 is deprecated; upgrade to 0.7.0 (sunset 2027-01-31). https://...`.
   Without the header, nothing happens.
-- `CreateCheckoutSessionWithRetry` warns before each retry, with the error code or type.
+- The client warns before each retry, with the call, the error code or type, and the attempt
+  number.
 - `Ping` warns when the clock skew is above 60 seconds. Requests fail at 300.
 
 The debug log is off by default. Pass your own logger with `WithLogger`, and let its handler
@@ -642,8 +653,9 @@ dominaite-go: POST /merchant-api/checkout/sessions 201 142ms request_id=... idem
 ```
 
 The line holds the method, the signed path, the status (`error` when the network failed), the
-time in milliseconds, the `Dominaite-Request-Id` response header and the idempotency key you
-sent. Give the request id to support when you ask about a call. The default logger never gets
+time in milliseconds, the request id and the idempotency key you sent. Each retry gets its own
+line. The request id is the `Dominaite-Request-Id` response header, or `metadata.requestId` in
+the body when the header is absent. Give the request id to support when you ask about a call. The default logger never gets
 debug lines.
 
 No warning and no debug line holds your secret, the signature, the cashier token, a query
@@ -716,22 +728,45 @@ comes back as a `*RefusalError` (`ALREADY_PROCESSED`, `PRIOR_ATTEMPT_FAILED`,
 `DUPLICATE_REQUEST`). Recover through `RefusalError.TransactionID` and `GetStatus` - see
 [Recovering from a replay refusal](#recovering-from-a-replay-refusal) below.
 
-`CreateCheckoutSessionWithRetry` retries with your key across attempts. It retries
-`*TransportError` (network failures and 5xx, including `MERCHANT_API_UNAVAILABLE`) and
-`PAYMENT_PROCESSING_UNAVAILABLE` in both of its forms, the 503 and the HTTP 200 refusal; after
-the last attempt you get that refusal back. Other refusals and authentication failures are not
-retried - they will not change. Rate limits are not retried either: retrying into a full queue only makes it
-longer, so a `*RateLimitError` comes straight back for you to reschedule.
+### Automatic retries
+
+The client retries a failed call on its own, with your key on every attempt. One policy covers
+every read (GET) and every POST that carries an idempotency key: sessions, charges, refunds,
+plans and agreements.
+
+- **What is retried:** a `*TransportError` (a network failure, a timeout or a 5xx, including
+  `MERCHANT_API_UNAVAILABLE` and `INTERNAL_ERROR`) and `PAYMENT_PROCESSING_UNAVAILABLE`, both
+  the 503 and the HTTP 200 session refusal. On a charge, the 503
+  `PAYMENT_METHOD_CHARGES_DISABLED` is retried too. After the last attempt you get the last
+  error back.
+- **What is not retried:** a 429 (`*RateLimitError`, with `RetryAfterSeconds` kept for you), any
+  4xx, any other refusal, `CHARGE_OUTCOME_UNKNOWN` and `CHARGE_FAILED`. They will not change on
+  a retry, and retrying into a full queue only makes it longer.
+- **Not covered:** `CreateWebhookEndpoint` is never retried, whatever the budget, because a
+  retry changes the endpoint's secret. DELETE and PATCH calls (`RevokePaymentMethod`,
+  `DeletePlan`, `CancelAgreement`, `DeleteWebhookEndpoint`, `UpdatePlan`) are not retried
+  either.
+- **Same request every time:** each attempt sends the same idempotency key and the same body.
+  Only the timestamp and the signature over it change.
+- **Budget:** `WithMaxRetries(n)` sets how many retries follow the first attempt. The default is
+  2, so a call is sent at most 3 times. `WithMaxRetries(0)` sends every call once.
+- **Waits:** the wait before retry n (0 for the first) is a random time between 0 and
+  500ms x 2^n, capped at 8 seconds. A cancelled context stops the wait at once.
+
+> **The timeout is per attempt.** With `WithTimeout(t)` and `WithMaxRetries(n)`, one call can
+> take up to (n + 1) x t plus the waits between attempts: at the defaults, 3 x 45s plus up to
+> 1.5s of waits. Put a deadline on the context when a caller waits on the answer.
 
 ```go
-session, err := client.CreateCheckoutSessionWithRetry(
-	ctx,
-	dominaite.CreateCheckoutSessionParams{Amount: 2500, Currency: "EUR", OrderReference: "order-1042", IdempotencyKey: key},
-	dominaite.RetryOptions{Attempts: 3, BaseDelay: 500 * time.Millisecond}, // zero values use these defaults
+client, err := dominaite.New(keyID, secret,
+	dominaite.WithBaseURL(dominaite.ProductionBaseURL),
+	dominaite.WithMaxRetries(2), // the default; 0 turns retries off
 )
 ```
 
-The delay doubles each attempt, and a cancelled context stops the wait immediately.
+`CreateCheckoutSessionWithRetry` and `RetryOptions` are deprecated: `CreateCheckoutSession`
+retries on its own now. The method still works with its own budget: `Attempts` is the total
+number of attempts (zero uses the client's budget) and `BaseDelay` replaces the 500ms base.
 
 ## Sessions expire
 
@@ -1286,15 +1321,32 @@ For the specific kind, use `errors.As` with the concrete pointer type:
 | Error | When | What to do |
 |---|---|---|
 | `*RefusalError` | The API answered with `success: false`. `ErrorCode` carries the reason. | Branch on `ErrorCode`. Do not blind-retry. |
-| `*ChargeError` | `ChargePaymentMethod` answered 409, 422, 502 or 503 with a code; `ErrorCode`, `HTTPStatus`, and `Charge`/`TransactionID` when the gateway attached the charge row. | Branch on `ErrorCode`; see [Stored payment methods](#stored-payment-methods-recurring). `CHARGE_OUTCOME_UNKNOWN`: poll `TransactionID`, never retry under a new key. |
+| `*ChargeError` | `ChargePaymentMethod` answered 404, 409, 422, 502 or 503 with a charge code; `ErrorCode`, `HTTPStatus`, and `Charge`/`TransactionID` when the gateway attached the charge row. | Branch on `ErrorCode`; see [Stored payment methods](#stored-payment-methods-recurring). `CHARGE_OUTCOME_UNKNOWN`: poll `TransactionID`, never retry under a new key. |
 | `*RevokeError` | `RevokePaymentMethod` answered 502 (`UPSTREAM_CONTRACT_ERROR`) or 503 (`MERCHANT_API_UNAVAILABLE`). Nothing changed. | 503: retry later. 502: contact support with the id. |
 | `*RefundError` | `CreateRefund` or `GetRefund` answered 400, 404, 409 or 422 with a code; `ErrorCode`, `HTTPStatus` and `Retryable`. A failed refund is not an error: it is a `Refund` with `Status` `failed`. | Branch on `ErrorCode`; see [Refunds](#refunds). Retry with the same key only when `Retryable`. |
 | `*AuthError` | 401 or 403, on `HTTPStatus`. 401: `ErrorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. 403: the request was signed correctly, but the key may not do this. `ErrorCode` is `INSUFFICIENT_SCOPE` (the key does not hold the scope of the route) or `VERIFY_ONLY_NOT_ENABLED`. | 401: fix the key id, secret, server clock, or allowlist. 403 `INSUFFICIENT_SCOPE`: use a key that holds the scope. 403 `VERIFY_ONLY_NOT_ENABLED`: we switch it on for your account. Never retry-loop. |
 | `*RateLimitError` | 429. `ErrorCode` is `RATE_LIMIT_EXCEEDED`, or on a charge `CHARGE_VELOCITY_EXCEEDED` or `CHARGE_DECLINE_RATE_EXCEEDED`. `RetryAfterSeconds` carries the `Retry-After` header when the API sent one as integer seconds; `HasRetryAfter` tells "wait 0s" apart from "the API did not say". `Raw` is the whole envelope. | Back off, then reschedule with the **same** idempotency key. The SDK never retries this for you. |
-| `*TransportError` | Network failure, timeout, or a 5xx without a code the SDK models. Wraps the cause, reachable with `errors.Unwrap`. A 5xx classifies on the status, so an HTML or empty error page from an overloaded edge is still retryable. | Retry with the **same** idempotency key. |
+| `*TransportError` | Network failure, timeout, or a 5xx without a code of the route. Wraps the cause, reachable with `errors.Unwrap`. `HTTPStatus` is the 5xx (0 when no response arrived), `ErrorCode` its code when it had one (`MERCHANT_API_UNAVAILABLE`, `INTERNAL_ERROR`), `Raw` its envelope. A 5xx classifies on the status, so an HTML or empty error page from an overloaded edge is still retryable. | The client already retried it. Retry later with the **same** idempotency key. |
 | `*APIError` | Any other rejecting or unexpected response; `HTTPStatus` and `ErrorCode` carry the details. `Raw` is the whole envelope of a rejection, with `error.params` and `error.validationErrors`. | Inspect. A storefront refusal lands here (see [Storefront errors](#storefront-errors)). A 3xx means a proxy or a wrong base URL answered with a redirect - the SDK never follows one. A replayed idempotency key does not land here; it comes back as a `*RefusalError`. |
 | `*ValidationError` | Bad arguments (non-positive amount outside a verify-only session, missing field or idempotency key, malformed key id). | Fix the call; nothing was sent. |
 | `*WebhookVerificationError` | `VerifyWebhook` rejected an inbound delivery; `Reason` carries which check failed. | Answer 400 with no detail. See [Webhooks](#rejections). |
+
+Every error built from a response carries `RequestID`: the `Dominaite-Request-Id` header, or
+`metadata.requestId` in the body when the header is absent. Results carry it too, on
+`RequestID`. Quote it when you ask support about a call. It is empty when no response arrived,
+and on a `*ValidationError` or a `*WebhookVerificationError`.
+
+```go
+var chargeErr *dominaite.ChargeError
+if errors.As(err, &chargeErr) {
+	log.Printf("charge refused: %s (request %s)", chargeErr.ErrorCode, chargeErr.RequestID)
+}
+```
+
+The code lists are exported for each route: `ChargeErrorCodes`, `SessionRefusalErrorCodes`,
+`RecurringErrorCodes`, `WebhookErrorCodes`, and for each group of the gateway's contract,
+`AuthenticationErrorCodes`, `AuthorizationErrorCodes`, `IdempotencyErrorCodes`,
+`StorefrontErrorCodes`, `TransientErrorCodes` and `ValidationErrorCodes`.
 
 Refusal codes on `RefusalError.ErrorCode`, exported as `ErrorCode*` constants:
 
@@ -1316,7 +1368,7 @@ Refusal codes on `RefusalError.ErrorCode`, exported as `ErrorCode*` constants:
 
 When a merchant runs more than one website, each session is filed under a storefront (an online
 location). A storefront refusal comes back as an `*APIError` with `HTTPStatus` and `ErrorCode`,
-nothing was minted, and a retry will not change it, so the retry helper returns it at once:
+nothing was minted, and a retry will not change it, so the client returns it at once:
 
 | `ErrorCode` | HTTP | Meaning |
 |---|---|---|
