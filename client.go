@@ -129,6 +129,7 @@ type Client struct {
 	httpClient *http.Client
 	userAgent  string
 	now        func() time.Time
+	optionErr  error
 }
 
 // String keeps the secret out of your logs. Printing a Client with %v, %+v or
@@ -199,13 +200,42 @@ func WithTimeout(timeout time.Duration) Option {
 }
 
 // WithUserAgent appends your own identifier to the SDK's User-Agent, which helps
-// when Dominaite support reads the access logs for your integration.
+// when Dominaite support reads the access logs for your integration. The SDK
+// sends "dominaite-go/<version> (go <go version>) <your suffix>". A suffix with a
+// control character makes New return a *ValidationError.
 func WithUserAgent(userAgent string) Option {
 	return func(c *Client) {
-		if trimmed := strings.TrimSpace(userAgent); trimmed != "" {
+		trimmed := strings.TrimSpace(userAgent)
+		if hasControlChar(trimmed) {
+			c.optionErr = newValidationError("userAgent must not contain control characters")
+			return
+		}
+		if trimmed != "" {
 			c.userAgent = c.userAgent + " " + trimmed
 		}
 	}
+}
+
+// sdkUserAgent is the User-Agent without a caller suffix:
+// dominaite-go/<version> (go <go version>). No operating system.
+func sdkUserAgent() string {
+	goVersion := strings.TrimPrefix(runtime.Version(), "go")
+	// A development toolchain reports "devel go1.x-<hash> <date>"; keep one token.
+	if fields := strings.Fields(goVersion); len(fields) > 0 {
+		goVersion = fields[0]
+	}
+	return fmt.Sprintf("dominaite-go/%s (go %s)", Version, goVersion)
+}
+
+// hasControlChar reports whether s holds a byte below 0x20 or 0x7F, which
+// would let a header value break out of its line.
+func hasControlChar(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // New builds a client from your API key id (dmk_...) and secret (dms_...), both
@@ -225,11 +255,14 @@ func New(keyID, secret string, opts ...Option) (*Client, error) {
 		keyID:      keyID,
 		secret:     secret,
 		httpClient: &http.Client{Timeout: defaultTimeout},
-		userAgent:  fmt.Sprintf("dominaite-go/%s (%s)", Version, runtime.Version()),
+		userAgent:  sdkUserAgent(),
 		now:        time.Now,
 	}
 	for _, opt := range opts {
 		opt(client)
+	}
+	if client.optionErr != nil {
+		return nil, client.optionErr
 	}
 
 	// There is no default base URL. A fallback to production would turn an unset
