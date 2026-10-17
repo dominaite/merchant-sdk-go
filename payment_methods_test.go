@@ -514,3 +514,41 @@ func TestRevokePaymentMethodMapsA404AndACodeless5xx(t *testing.T) {
 		t.Fatalf("got %T (%v), want *TransportError", err, err)
 	}
 }
+
+// The gateway signs the lowercase pm_ id. An id typed in upper case is sent
+// and signed lowercase, on the charge and on the revoke, so it does not fail
+// with INVALID_SIGNATURE.
+func TestAnUppercasePaymentMethodIDIsSentAndSignedLowercase(t *testing.T) {
+	upper := strings.ToUpper(testPaymentMethodID)
+	lower := strings.ToLower(testPaymentMethodID)
+
+	server, calls := newTestServer(t, reply{Status: http.StatusCreated, Body: testCharge})
+	client := newTestClient(t, server.URL)
+	if _, err := client.ChargePaymentMethod(context.Background(), upper, testChargeParams()); err != nil {
+		t.Fatalf("ChargePaymentMethod: %v", err)
+	}
+	call := calls()[0]
+	path := PaymentMethodsPath + "/" + lower + "/charges"
+	if call.Path != path {
+		t.Fatalf("path = %s, want %s", call.Path, path)
+	}
+	want := Sign(SignInput{
+		Secret:         vector.Secret,
+		Timestamp:      call.Header.Get("X-Timestamp"),
+		Method:         http.MethodPost,
+		Path:           path,
+		IdempotencyKey: chargeVector.IdempotencyKey,
+		Body:           call.Body,
+	})
+	if got := call.Header.Get("X-Signature"); got != want {
+		t.Fatalf("X-Signature = %s, want the signature of %s", got, path)
+	}
+
+	server, calls = newTestServer(t, reply{Status: http.StatusNoContent, Body: ""})
+	if err := newTestClient(t, server.URL).RevokePaymentMethod(context.Background(), upper); err != nil {
+		t.Fatalf("RevokePaymentMethod: %v", err)
+	}
+	if got := calls()[0].Path; got != PaymentMethodsPath+"/"+lower {
+		t.Fatalf("revoke path = %s, want the lowercase id", got)
+	}
+}

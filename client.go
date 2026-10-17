@@ -988,10 +988,12 @@ func validateIdempotencyKey(idempotencyKey string) error {
 	return nil
 }
 
-// normalizePaymentMethodID refuses anything that would not survive as one path
-// segment of the signed canonical path.
+// normalizePaymentMethodID lowercases a payment method id and refuses
+// anything that would not survive as one path segment of the signed canonical
+// path. The gateway signs the lowercase pm_ id, so an id typed in upper case
+// would otherwise fail with INVALID_SIGNATURE.
 func normalizePaymentMethodID(paymentMethodID string) (string, error) {
-	normalized := strings.TrimSpace(paymentMethodID)
+	normalized := strings.ToLower(strings.TrimSpace(paymentMethodID))
 	if !paymentMethodIDPattern.MatchString(normalized) {
 		return "", newValidationError("paymentMethodId must be the id from GetStatus().StoredPaymentMethod")
 	}
