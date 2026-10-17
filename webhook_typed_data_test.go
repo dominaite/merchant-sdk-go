@@ -155,3 +155,33 @@ func TestChargeOutcomeConstantsAreTheWireStrings(t *testing.T) {
 		}
 	}
 }
+
+// A correctly signed event never fails on its data. Data that does not fit
+// the typed struct leaves it nil and stays on Raw, as 0.6.0 accepted it.
+func TestAWrongShapedChargeEventStillVerifies(t *testing.T) {
+	body := `{"id":"d5","type":"charge.succeeded","createdAt":"2026-09-25T12:00:00Z","data":{` +
+		`"chargeId":"ch_0123456789abcdef0123456789abcdef","transactionId":"tx-5","outcome":"succeeded",` +
+		`"periodNumber":"two","amount":990,"currency":"EUR","sequence":3}}`
+	event := mustVerify(t, body)
+
+	if event.Data.Charge != nil {
+		t.Errorf("Charge = %+v, want nil for data that does not fit", event.Data.Charge)
+	}
+	if string(event.Data.Raw) == "" || event.Data.TransactionID != "tx-5" || event.Data.Amount != 990 {
+		t.Errorf("Raw %q, TransactionID %q, Amount %d: want the data kept", event.Data.Raw, event.Data.TransactionID, event.Data.Amount)
+	}
+}
+
+func TestAWrongShapedAgreementEventStillVerifies(t *testing.T) {
+	body := `{"id":"d6","type":"agreement.activated","createdAt":"2026-09-25T12:00:00Z","data":{` +
+		`"id":"agr_0123456789abcdef0123456789abcdef","planId":"plan_1","status":"active",` +
+		`"intervalCount":"monthly","amount":990,"currency":"EUR","sequence":1}}`
+	event := mustVerify(t, body)
+
+	if event.Data.Agreement != nil {
+		t.Errorf("Agreement = %+v, want nil for data that does not fit", event.Data.Agreement)
+	}
+	if string(event.Data.Raw) == "" || event.Data.Status != "active" {
+		t.Errorf("Raw %q, Status %q: want the data kept", event.Data.Raw, event.Data.Status)
+	}
+}

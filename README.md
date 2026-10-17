@@ -384,6 +384,9 @@ event.Data.Raw               // the data object, for fields not modelled above
 event.Raw                    // the verified bytes, for anything not modelled above
 ```
 
+`Charge` and `Agreement` are also nil when the data does not fit their struct. The event still
+verifies; read `event.Data.Raw` then.
+
 `APIVersion` is the dated version of the payload shape. Fields are only ever added under a
 version, never renamed or removed, so ignore fields you do not recognise. A retry resends the
 bytes of the first attempt, so a redelivered event keeps its `APIVersion`.

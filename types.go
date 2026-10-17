@@ -1017,13 +1017,15 @@ type WebhookData struct {
 	// positive number.
 	Sequence int64 `json:"sequence"`
 
-	// Charge is the typed data of a charge.* event, nil on every other event.
+	// Charge is the typed data of a charge.* event, nil on every other event,
+	// and nil when the data does not fit ChargeWebhookData; read Raw then.
 	// The fields above that a charge event shares (TransactionID, Amount,
 	// Currency, OrderReference, Description, DeclineClass, Sequence) are set
 	// too; Status is empty, because a charge event says Charge.Outcome.
 	Charge *ChargeWebhookData `json:"-"`
 	// Agreement is the typed data of an agreement.* event, nil on every other
-	// event. Status, PreviousStatus, Amount, Currency and Sequence above are
+	// event, and nil when the data does not fit AgreementWebhookData; read Raw
+	// then. Status, PreviousStatus, Amount, Currency and Sequence above are
 	// set too, with the agreement's values.
 	Agreement *AgreementWebhookData `json:"-"`
 

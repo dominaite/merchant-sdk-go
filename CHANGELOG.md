@@ -35,7 +35,8 @@
 - Typed webhook data. `WebhookData.PaymentMethod` and `WalletType` on `payment.*` and
   `verification.*` events. `WebhookData.Charge` (`*ChargeWebhookData`) on `charge.*` events
   and `WebhookData.Agreement` (`*AgreementWebhookData`) on `agreement.*` events, with the
-  `ChargeOutcome*` constants.
+  `ChargeOutcome*` constants. Data that does not fit leaves them nil and stays on
+  `WebhookData.Raw`; the event still verifies.
 - Error code lists: `AuthenticationErrorCodes`, `IdempotencyErrorCodes`,
   `TransientErrorCodes`, `ValidationErrorCodes`, `SessionRefusalErrorCodes`,
   `RecurringErrorCodes` and `WebhookErrorCodes`, with their constants. `ChargeErrorCodes` now
