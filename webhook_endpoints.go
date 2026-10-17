@@ -101,11 +101,13 @@ func (e WebhookEndpoint) GoString() string { return e.String() }
 //
 // params.IdempotencyKey is required and signed. The same key with the same
 // URL and events answers the same endpoint without its secret, and registers
-// nothing new. After no answer, a timeout or a 503, retry with the SAME key:
-// the retry replaces an endpoint the lost attempt registered, and answers a
-// new id and a new secret. A retry with a new key cannot do that. The client
-// never retries this call on its own, whatever WithMaxRetries says: a retry
-// changes the secret, so you decide when to send one.
+// nothing new. After no answer, a timeout or a 503, retry with the SAME key.
+// When the first attempt never finished, the retry replaces the endpoint it
+// left and answers a new id and a new secret. When the endpoint was
+// registered and only its answer was lost, the retry answers that endpoint
+// with an empty Secret: delete it, then create it again with a new key. The
+// client never retries this call on its own, whatever WithMaxRetries says: a
+// retry can answer without the secret, so you decide when to send one.
 //
 // Errors it returns:
 //   - *ValidationError: an empty URL, no events, or a bad IdempotencyKey;

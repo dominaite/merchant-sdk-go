@@ -559,12 +559,14 @@ leave it empty. Lost the secret? Delete the endpoint and create it again. Printi
 `Raw`.
 
 `IdempotencyKey` is required and signed. After no answer, a timeout or a 5xx, retry with the
-**same** key: the retry replaces an endpoint the lost attempt registered, and answers a new id
-and a new secret. One key never holds two endpoints. A 503 can last a while: retry for about
-five minutes, then check `ListWebhookEndpoints` and delete any endpoint you never got a secret
-for. The same key with other URL or events is refused with
-`IDEMPOTENCY_KEY_REUSED`. A key used again more than a day later, while its endpoint still
-exists, is refused with `WEBHOOK_ALREADY_REGISTERED`:
+**same** key. When the first attempt never finished, the retry replaces the endpoint it left and
+answers a new id and a new secret. When the endpoint was registered and only its answer was
+lost, the retry answers that endpoint with an empty `Secret`: delete it with
+`DeleteWebhookEndpoint`, then create it again with a new key. One key never holds two
+endpoints. A 503 can last a while: retry for about five minutes, then check
+`ListWebhookEndpoints` and delete any endpoint you never got a secret for. The same key with
+other URL or events is refused with `IDEMPOTENCY_KEY_REUSED`. A key used again more than a day
+later, while its endpoint still exists, is refused with `WEBHOOK_ALREADY_REGISTERED`:
 
 ```go
 var apiErr *dominaite.APIError
@@ -746,9 +748,9 @@ plans and agreements.
   4xx, any other refusal, `CHARGE_OUTCOME_UNKNOWN` and `CHARGE_FAILED`. They will not change on
   a retry, and retrying into a full queue only makes it longer.
 - **Not covered:** `CreateWebhookEndpoint` is never retried, whatever the budget, because a
-  retry changes the endpoint's secret. DELETE and PATCH calls (`RevokePaymentMethod`,
-  `DeletePlan`, `CancelAgreement`, `DeleteWebhookEndpoint`, `UpdatePlan`) are not retried
-  either.
+  retry can answer the endpoint without its secret. DELETE and PATCH calls
+  (`RevokePaymentMethod`, `DeletePlan`, `CancelAgreement`, `DeleteWebhookEndpoint`,
+  `UpdatePlan`) are not retried either.
 - **Same request every time:** each attempt sends the same idempotency key and the same body.
   Only the timestamp and the signature over it change.
 - **Budget:** `WithMaxRetries(n)` sets how many retries follow the first attempt. The default is
