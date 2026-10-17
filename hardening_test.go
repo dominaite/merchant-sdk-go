@@ -131,13 +131,12 @@ func TestBaseURLMustBeHTTPS(t *testing.T) {
 	}
 }
 
-// The default is production, and production is https.
-func TestDefaultBaseURLIsHTTPS(t *testing.T) {
-	if !strings.HasPrefix(DefaultBaseURL, "https://") {
-		t.Fatalf("DefaultBaseURL = %q, want https://", DefaultBaseURL)
-	}
-	if _, err := New(testKeyID, vector.Secret); err != nil {
-		t.Fatalf("New with the default base URL: %v", err)
+// Both named base URLs are https.
+func TestNamedBaseURLsAreHTTPS(t *testing.T) {
+	for _, baseURL := range []string{SandboxBaseURL, ProductionBaseURL} {
+		if !strings.HasPrefix(baseURL, "https://") {
+			t.Fatalf("%q, want https://", baseURL)
+		}
 	}
 }
 

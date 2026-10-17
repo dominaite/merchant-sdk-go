@@ -8,7 +8,11 @@
 // Keep your API secret on the server. Never ship it to a browser, never commit
 // it, never log it.
 //
-//	client, err := dominaite.New(os.Getenv("DOMINAITE_KEY_ID"), os.Getenv("DOMINAITE_SECRET"))
+//	client, err := dominaite.New(
+//		os.Getenv("DOMINAITE_KEY_ID"),
+//		os.Getenv("DOMINAITE_SECRET"),
+//		dominaite.WithBaseURL(dominaite.SandboxBaseURL), // required
+//	)
 //	if err != nil {
 //		return err
 //	}
@@ -43,8 +47,11 @@ import (
 )
 
 const (
-	// DefaultBaseURL is the production merchant API.
-	DefaultBaseURL = "https://api.dominaite.com/payments"
+	// SandboxBaseURL is the sandbox merchant API. Use it with your sandbox keys.
+	SandboxBaseURL = "https://api.staging.dominaite.com/payments"
+
+	// ProductionBaseURL is the production merchant API. Use it with your live keys.
+	ProductionBaseURL = "https://api.dominaite.com/payments"
 
 	// SessionsPath is the canonical path that gets signed. POST creates a
 	// session; GET SessionsPath + "/{transactionId}" reads its status.
@@ -151,9 +158,10 @@ func redactSecret(secret string) string {
 // Option configures a Client. Pass options to New.
 type Option func(*Client)
 
-// WithBaseURL points the client at a non-production environment. Trailing
-// slashes are trimmed. Empty values are ignored, so you can pass an unset
-// environment variable straight through and still get production.
+// WithBaseURL sets the API the client calls: SandboxBaseURL, ProductionBaseURL
+// or your own value. It is required: New returns a *ValidationError without it,
+// and when the value is empty or whitespace. Whitespace and trailing slashes are
+// trimmed.
 //
 // The URL must be https://. Plain http:// is accepted only for localhost,
 // 127.0.0.1 and ::1, so a local mock server still works; anything else is
@@ -161,9 +169,7 @@ type Option func(*Client)
 // signature, key id and the whole request body travel in clear text.
 func WithBaseURL(baseURL string) Option {
 	return func(c *Client) {
-		if trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/"); trimmed != "" {
-			c.baseURL = trimmed
-		}
+		c.baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	}
 }
 
@@ -205,8 +211,8 @@ func WithUserAgent(userAgent string) Option {
 // New builds a client from your API key id (dmk_...) and secret (dms_...), both
 // from the dashboard's Website integration tab. It returns a *ValidationError
 // when either credential has the wrong prefix, which catches a swapped key id
-// and secret before anything is sent, and when WithBaseURL was given a
-// non-https URL outside loopback.
+// and secret before anything is sent. It also returns one when WithBaseURL is
+// missing, empty or whitespace, or is not https:// outside loopback.
 func New(keyID, secret string, opts ...Option) (*Client, error) {
 	if !strings.HasPrefix(keyID, "dmk_") {
 		return nil, newValidationError("keyId must start with dmk_")
@@ -218,7 +224,6 @@ func New(keyID, secret string, opts ...Option) (*Client, error) {
 	client := &Client{
 		keyID:      keyID,
 		secret:     secret,
-		baseURL:    DefaultBaseURL,
 		httpClient: &http.Client{Timeout: defaultTimeout},
 		userAgent:  fmt.Sprintf("dominaite-go/%s (%s)", Version, runtime.Version()),
 		now:        time.Now,
@@ -227,6 +232,12 @@ func New(keyID, secret string, opts ...Option) (*Client, error) {
 		opt(client)
 	}
 
+	// There is no default base URL. A fallback to production would turn an unset
+	// environment variable into sandbox keys sent to production.
+	if client.baseURL == "" {
+		return nil, newValidationError("baseURL is required. Use " + SandboxBaseURL +
+			" for the sandbox or " + ProductionBaseURL + " for production.")
+	}
 	if err := validateBaseURL(client.baseURL); err != nil {
 		return nil, err
 	}
