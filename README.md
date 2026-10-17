@@ -1416,3 +1416,22 @@ The signed payload is five lines:
 `"{timestamp}\n{METHOD}\n{path}\n{idempotencyKey}\n{sha256hex(body)}"`, signed as lowercase hex
 HMAC-SHA256 with your secret, UTF-8 throughout. GET signs an empty idempotency key and an empty
 body, and sends no `Idempotency-Key` header.
+
+## Versioning and support
+
+The SDK is 0.x on purpose. A minor release (for example 0.6 to 0.7) can contain a breaking
+change. A patch release (0.6.0 to 0.6.1) does not. `CHANGELOG.md` lists every breaking change
+and what to do about it.
+
+`go.mod` records the exact version you build with, so nothing moves until you ask. Upgrade on
+purpose with `go get github.com/dominaite/merchant-sdk-go@v0.7.0`, and read `CHANGELOG.md`
+first. `go get -u` can take you to a new minor version, which can break your build.
+
+The SDK needs Go 1.21 or later. CI tests it on Go 1.21 and on the current stable Go.
+
+When the API marks your SDK version as deprecated, it sends a `Dominaite-Sdk-Notice` header.
+The client logs it as one `slog.LevelWarn` warning for each distinct notice (see
+[Logging and warnings](#logging-and-warnings)). The warning names the version to upgrade to and
+the sunset date when the notice carries them. Send the client's warnings to a log you read
+with `WithLogger`, so you see the notice before the sunset date. A response without the header
+changes nothing.
