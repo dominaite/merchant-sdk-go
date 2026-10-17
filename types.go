@@ -227,6 +227,12 @@ type CheckoutSession struct {
 	// takes the first payment for. Empty on a one-off checkout.
 	AgreementID string `json:"agreementId,omitempty"`
 
+	// RequestID is the API's id of the call that returned this: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when the API sent
+	// neither.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed payload, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
 }
@@ -264,6 +270,12 @@ type Ping struct {
 	// value creeps toward 300, fix NTP now - requests start failing at 300.
 	ClockSkewSeconds int64 `json:"clockSkewSeconds"`
 
+	// RequestID is the API's id of the call that returned this: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when the API sent
+	// neither.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed payload, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
 }
@@ -278,6 +290,12 @@ type IntegrationContract struct {
 	// WebhookEventCatalog is the payment.* webhook event types. The recurring
 	// and verification event types are in their own sections of Raw.
 	WebhookEventCatalog []string `json:"webhookEventCatalog"`
+
+	// RequestID is the API's id of the call that returned this: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when the API sent
+	// neither.
+	RequestID string `json:"-"`
 
 	// Raw is the whole contract as the API sent it.
 	Raw json.RawMessage `json:"-"`
@@ -441,6 +459,12 @@ type CheckoutStatus struct {
 	// payment, which sends payment.* events only, and before the first
 	// charge.* event.
 	Sequence int64 `json:"sequence,omitempty"`
+
+	// RequestID is the API's id of the call that returned this: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when the API sent
+	// neither.
+	RequestID string `json:"-"`
 
 	// Raw is the unparsed payload, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
@@ -658,6 +682,12 @@ type PaymentMethodCharge struct {
 	// the live value.
 	Sequence int64 `json:"sequence,omitempty"`
 
+	// RequestID is the API's id of the call that returned this: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when the API sent
+	// neither.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed charge object, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
 }
@@ -758,6 +788,12 @@ type Refund struct {
 	// failed. Empty before that.
 	CompletedAt string `json:"completedAt,omitempty"`
 
+	// RequestID is the API's id of the call that returned this: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when the API sent
+	// neither.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed refund object, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
 }
@@ -781,6 +817,12 @@ type RefundList struct {
 	// processing, then succeeded and failed, newest first within each group.
 	// Empty when there are none.
 	Refunds []Refund `json:"refunds"`
+
+	// RequestID is the API's id of the call that returned this: the
+	// Dominaite-Request-Id response header, or metadata.requestId in the body
+	// when the header is absent. Quote it to support. Empty when the API sent
+	// neither.
+	RequestID string `json:"-"`
 
 	// Raw is the unparsed refund list, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
@@ -916,6 +958,17 @@ type WebhookData struct {
 	// Empty when unknown, which today includes every refund.
 	IdempotencyKey string `json:"idempotencyKey"`
 
+	// PaymentMethod is how the payer paid, one of PaymentMethodCategories, on
+	// payment.* and verification.* events: the same value as
+	// CheckoutStatus.PaymentMethod. Nullable on the wire; empty string while
+	// no method is known. On charge.* events the wire field is an object
+	// instead: read it from Charge.PaymentMethod.
+	PaymentMethod string `json:"paymentMethod"`
+	// WalletType is which wallet, when PaymentMethod is PaymentMethodWallet. A
+	// value outside WalletTypes is a valid wallet this SDK does not name yet.
+	// Nullable on the wire; empty string for non-wallet payments.
+	WalletType string `json:"walletType"`
+
 	// PaymentMethodBrand is the lower-cased card brand (visa, mastercard, ...)
 	// once a card payment has been attempted. Nullable on the wire; empty
 	// string while the payment is open, for non-card methods, and when the
@@ -939,7 +992,7 @@ type WebhookData struct {
 	// GetStatus is the source of truth: on a SaveCard session whose event has
 	// StoredPaymentMethod nil, read the status to pick the card up.
 	//
-	// charge.* events carry storedPaymentMethodId instead (read it from Raw).
+	// charge.* events carry the id instead, on Charge.StoredPaymentMethodID.
 	StoredPaymentMethod *StoredPaymentMethod `json:"storedPaymentMethod,omitempty"`
 
 	// VerifyOnly is true on every event of a verify-only session. False (or
@@ -954,14 +1007,171 @@ type WebhookData struct {
 
 	// Sequence orders agreement.* and charge.* events for one object: it counts
 	// the announced changes of that object, only ever rises, and a redelivery
-	// carries the same number. The object is the agreement (data.id) for
-	// agreement.*, the agreement period (agreementId plus periodNumber) for a
-	// charge the platform placed for an agreement, and the chargeId for a
-	// one-off charge; read those keys from Raw. Keep the highest Sequence you
+	// carries the same number. The object is the agreement (Agreement.ID) for
+	// agreement.*, the agreement period (Charge.AgreementID plus
+	// Charge.PeriodNumber) for a charge the platform placed for an agreement,
+	// and Charge.ChargeID for a one-off charge. Keep the highest Sequence you
 	// have processed per object and discard any event whose Sequence is not
 	// higher. Zero when absent (payment.* events do not carry it) and on
 	// events recorded before the counter existed; treat zero as older than any
 	// positive number.
+	Sequence int64 `json:"sequence"`
+
+	// Charge is the typed data of a charge.* event, nil on every other event,
+	// and nil when the data does not fit ChargeWebhookData; read Raw then.
+	// The fields above that a charge event shares (TransactionID, Amount,
+	// Currency, OrderReference, Description, DeclineClass, Sequence) are set
+	// too; Status is empty, because a charge event says Charge.Outcome.
+	Charge *ChargeWebhookData `json:"-"`
+	// Agreement is the typed data of an agreement.* event, nil on every other
+	// event, and nil when the data does not fit AgreementWebhookData; read Raw
+	// then. Status, PreviousStatus, Amount, Currency and Sequence above are
+	// set too, with the agreement's values.
+	Agreement *AgreementWebhookData `json:"-"`
+
+	// Raw is the unparsed data object, for fields not modelled above.
+	Raw json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON reads the data object of any event type. The paymentMethod
+// field is a string on payment.* and verification.* events and an object on
+// charge.* events; only the string lands on PaymentMethod.
+func (d *WebhookData) UnmarshalJSON(raw []byte) error {
+	// The local type drops this method, so json.Unmarshal does not recurse.
+	type data WebhookData
+	var wire struct {
+		data
+		PaymentMethod json.RawMessage `json:"paymentMethod"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return err
+	}
+	*d = WebhookData(wire.data)
+	var category *string
+	if len(wire.PaymentMethod) > 0 && wire.PaymentMethod[0] == '"' {
+		if err := json.Unmarshal(wire.PaymentMethod, &category); err != nil {
+			return err
+		}
+		d.PaymentMethod = *category
+	}
+	d.Raw = append(json.RawMessage(nil), raw...)
+	return nil
+}
+
+// Outcomes of a charge on charge.* events, on ChargeWebhookData.Outcome, in
+// the gateway's own order. ChargeOutcomeRetrying: an agreement period was
+// declined softly and the platform tries the same card again, at
+// NextAttemptAt.
+const (
+	ChargeOutcomeSucceeded = "succeeded"
+	ChargeOutcomeRetrying  = "retrying"
+	ChargeOutcomeFailed    = "failed"
+)
+
+// ChargeOutcomes is the charge outcome vocabulary, in the gateway's order.
+// Treat a value you do not know as not final.
+var ChargeOutcomes = []string{
+	ChargeOutcomeSucceeded,
+	ChargeOutcomeRetrying,
+	ChargeOutcomeFailed,
+}
+
+// ChargeWebhookData is the data of a charge.* event: a charge on a stored
+// card, one-off (ChargePaymentMethod) or placed by the platform for an
+// agreement period. Webhooks send every field, null when empty: a null string
+// reads as "", a null number as nil.
+type ChargeWebhookData struct {
+	// ChargeID is ch_ followed by 32 hex characters: the same id
+	// ChargePaymentMethod returned for a one-off charge.
+	ChargeID string `json:"chargeId"`
+	// TransactionID is the transaction the charge created; readable with
+	// GetStatus.
+	TransactionID string `json:"transactionId"`
+	// StoredPaymentMethodID is the pm_ id of the card that was charged.
+	StoredPaymentMethodID string `json:"storedPaymentMethodId"`
+	// AgreementID is the agr_ id the charge belongs to. Empty for a one-off
+	// charge without an agreement.
+	AgreementID string `json:"agreementId"`
+	// CustomerReference is the agreement's customer reference. Empty without
+	// an agreement.
+	CustomerReference string `json:"customerReference"`
+	// Outcome is one of the ChargeOutcome* values.
+	Outcome string `json:"outcome"`
+	// PeriodNumber is the agreement period the charge pays, from 1. nil for a
+	// one-off charge.
+	PeriodNumber *int `json:"periodNumber"`
+	// AttemptNumber counts the attempts on this period, from 1. nil when the
+	// gateway did not count one.
+	AttemptNumber *int `json:"attemptNumber"`
+	// Amount is in MINOR units of Currency.
+	Amount   int64  `json:"amount"`
+	Currency string `json:"currency"`
+	// PaymentMethod is the brand and last four digits of the card. nil when
+	// the provider reported neither.
+	PaymentMethod *ChargeWebhookPaymentMethod `json:"paymentMethod"`
+	// OrderReference and Description are what the charge was sent with.
+	OrderReference string `json:"orderReference"`
+	Description    string `json:"description"`
+	// DeclineClass is one of the DeclineClass* constants on charge.failed and
+	// charge.retrying, empty otherwise. DeclineCode is the issuer's code,
+	// verbatim, for your logs.
+	DeclineClass string `json:"declineClass"`
+	DeclineCode  string `json:"declineCode"`
+	// NextAttemptAt is when the platform tries the card again, on
+	// charge.retrying. NextChargeAt is the agreement's next charge, when
+	// there is one. Both are as the API sent them, empty when null.
+	NextAttemptAt string `json:"nextAttemptAt"`
+	NextChargeAt  string `json:"nextChargeAt"`
+	// Sequence is the same value as WebhookData.Sequence.
+	Sequence int64 `json:"sequence"`
+
+	// Raw is the unparsed data object, for fields not modelled above.
+	Raw json.RawMessage `json:"-"`
+}
+
+// ChargeWebhookPaymentMethod is the card on a charge.* event.
+type ChargeWebhookPaymentMethod struct {
+	// Brand is the lower-cased card brand (visa, mastercard, ...). Empty when
+	// the provider did not report one.
+	Brand string `json:"brand"`
+	// Last4 is the card's last four digits. Empty when unknown.
+	Last4 string `json:"last4"`
+}
+
+// AgreementWebhookData is the data of an agreement.* event: the agreement
+// after the change. The fields are the ones GetAgreement returns, plus
+// PreviousStatus. Webhooks send every field, null when empty: a null string
+// reads as "", a null number as nil.
+type AgreementWebhookData struct {
+	// ID is the agr_ id: the ordering key of agreement.* events.
+	ID                string `json:"id"`
+	PlanID            string `json:"planId"`
+	CustomerReference string `json:"customerReference"`
+	// StoredPaymentMethodID is the pm_ id of the card on file, empty until one
+	// is saved.
+	StoredPaymentMethodID string `json:"storedPaymentMethodId"`
+	// Status is one of the AgreementStatus* values; PreviousStatus is the
+	// status it moved from.
+	Status         string `json:"status"`
+	PreviousStatus string `json:"previousStatus"`
+	// Amount is the charge per period, in MINOR units of Currency.
+	Amount   int64  `json:"amount"`
+	Currency string `json:"currency"`
+	// IntervalUnit is one of the IntervalUnit* values.
+	IntervalUnit  string `json:"intervalUnit"`
+	IntervalCount int    `json:"intervalCount"`
+	// PeriodCount is nil when the agreement bills until it is cancelled.
+	PeriodCount *int `json:"periodCount"`
+	TrialDays   int  `json:"trialDays"`
+	// NextChargeAt, ActivatedAt and CancelledAt are as the API sent them,
+	// empty when null.
+	NextChargeAt string `json:"nextChargeAt"`
+	ActivatedAt  string `json:"activatedAt"`
+	CancelledAt  string `json:"cancelledAt"`
+	// Version starts at 1 and rises when the price changes for a future
+	// period.
+	Version int `json:"version"`
+	// Sequence is the same value as WebhookData.Sequence.
 	Sequence int64 `json:"sequence"`
 
 	// Raw is the unparsed data object, for fields not modelled above.

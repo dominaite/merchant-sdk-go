@@ -49,6 +49,7 @@ type recordedCall struct {
 type reply struct {
 	Status int
 	Body   any
+	Header map[string]string
 }
 
 // newTestServer serves replies in order, repeating the last one once exhausted,
@@ -83,6 +84,9 @@ func newTestServer(t *testing.T, replies ...reply) (*httptest.Server, func() []r
 			status = http.StatusOK
 		}
 		w.Header().Set("Content-Type", "application/json")
+		for name, value := range next.Header {
+			w.Header().Set(name, value)
+		}
 		w.WriteHeader(status)
 		switch payload := next.Body.(type) {
 		case string:
@@ -106,6 +110,8 @@ func newTestClient(t *testing.T, baseURL string) *Client {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// Keep the default retry budget, without the waits.
+	client.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	return client
 }
 
@@ -449,6 +455,21 @@ func TestAuthErrorFromEnvelopeErrorCode(t *testing.T) {
 	var authErr *AuthError
 	if !errors.As(err, &authErr) || authErr.ErrorCode != "IP_NOT_ALLOWED" {
 		t.Fatalf("got %v, want *AuthError with IP_NOT_ALLOWED", err)
+	}
+	// The API's own text says what failed; the fixed hint follows it.
+	want := "caller not allowlisted. Authentication failed - check your key id, secret, and server clock."
+	if authErr.Error() != want {
+		t.Fatalf("message = %q, want %q", authErr.Error(), want)
+	}
+}
+
+func TestAuthErrorWithoutAMessageKeepsTheHint(t *testing.T) {
+	server, _ := newTestServer(t, reply{Status: 401, Body: map[string]any{"success": false, "error": map[string]any{"code": "INVALID_API_KEY"}}})
+	_, err := newTestClient(t, server.URL).Ping(context.Background())
+
+	var authErr *AuthError
+	if !errors.As(err, &authErr) || authErr.Error() != "Authentication failed - check your key id, secret, and server clock." {
+		t.Fatalf("got %v, want the fixed hint", err)
 	}
 }
 

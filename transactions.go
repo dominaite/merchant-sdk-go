@@ -95,6 +95,11 @@ type Transaction struct {
 	// dashboard shows. Empty until the money is paid out.
 	PayoutID string `json:"payoutId,omitempty"`
 
+	// RequestID is the API's id of the call that read this page, the same as
+	// TransactionList.RequestID. Quote it to support. Empty when the API sent
+	// none.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed item, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
 }
@@ -107,6 +112,10 @@ type TransactionList struct {
 	// NextCursor reads the next page: send it back as Cursor with the same
 	// From, To, SettledFrom, SettledTo and Status. Empty on the last page.
 	NextCursor string `json:"nextCursor,omitempty"`
+
+	// RequestID is the API's id of the call that read this page. Quote it to
+	// support. Empty when the API sent none.
+	RequestID string `json:"-"`
 
 	// Raw is the unparsed page, for fields this struct does not model yet.
 	Raw json.RawMessage `json:"-"`
@@ -157,31 +166,36 @@ func (c *Client) ListTransactions(ctx context.Context, params ListTransactionsPa
 		query.Set("cursor", params.Cursor)
 	}
 
-	// GET signs an EMPTY idempotency key, an EMPTY body and the path without
-	// its query string.
-	reply, err := c.sendQuery(ctx, http.MethodGet, TransactionsPath, query.Encode(), "", "")
-	if err != nil {
-		return nil, err
-	}
-	if reply.status >= 400 {
-		return nil, reply.rejection()
-	}
-	if !reply.parsed || !isJSONObject(reply.data) {
-		return nil, newAPIError(reply.status, "The API answered the transaction list without a page body")
-	}
+	return retry(ctx, c, c.retryPolicy("ListTransactions"), func() (*TransactionList, error) {
+		// GET signs an EMPTY idempotency key, an EMPTY body and the path without
+		// its query string.
+		reply, err := c.sendQuery(ctx, http.MethodGet, TransactionsPath, query.Encode(), "", "")
+		if err != nil {
+			return nil, err
+		}
+		if reply.status >= 400 {
+			return nil, reply.rejection()
+		}
+		if !reply.parsed || !isJSONObject(reply.data) {
+			return nil, reply.apiError("The API answered the transaction list without a page body")
+		}
 
-	// A null nextCursor on the last page decodes as the empty string.
-	var page struct {
-		Items      json.RawMessage `json:"items"`
-		NextCursor string          `json:"nextCursor"`
-	}
-	if json.Unmarshal(reply.data, &page) != nil {
-		return nil, newAPIError(reply.status, "The API returned an unexpected transaction page")
-	}
-	items, err := decodeItems(page.Items, func(item *Transaction, raw json.RawMessage) { item.Raw = raw })
-	if err != nil {
-		return nil, newAPIError(reply.status, "The API returned an unexpected transaction in the page")
-	}
+		// A null nextCursor on the last page decodes as the empty string.
+		var page struct {
+			Items      json.RawMessage `json:"items"`
+			NextCursor string          `json:"nextCursor"`
+		}
+		if json.Unmarshal(reply.data, &page) != nil {
+			return nil, reply.apiError("The API returned an unexpected transaction page")
+		}
+		items, err := decodeItems(page.Items, func(item *Transaction, raw json.RawMessage) {
+			item.Raw = raw
+			item.RequestID = reply.requestID
+		})
+		if err != nil {
+			return nil, reply.apiError("The API returned an unexpected transaction in the page")
+		}
 
-	return &TransactionList{Items: items, NextCursor: page.NextCursor, Raw: reply.data}, nil
+		return &TransactionList{Items: items, NextCursor: page.NextCursor, RequestID: reply.requestID, Raw: reply.data}, nil
+	})
 }

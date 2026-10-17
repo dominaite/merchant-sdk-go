@@ -162,6 +162,10 @@ type Agreement struct {
 	// CancelledAt is ISO 8601 UTC, empty unless cancelled.
 	CancelledAt string `json:"cancelledAt,omitempty"`
 
+	// RequestID is the API's id of the call that returned this agreement.
+	// Quote it to support. Empty when the API sent none.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed agreement object, for fields this struct does not
 	// model yet.
 	Raw json.RawMessage `json:"-"`
@@ -201,11 +205,13 @@ func (c *Client) CreateAgreement(ctx context.Context, params CreateAgreementPara
 		return nil, newValidationError("Request parameters are not JSON-encodable: " + err.Error())
 	}
 
-	reply, err := c.send(ctx, http.MethodPost, AgreementsPath, string(body), idempotencyKey)
-	if err != nil {
-		return nil, err
-	}
-	return reply.agreement()
+	return retry(ctx, c, c.retryPolicy("CreateAgreement"), func() (*Agreement, error) {
+		reply, err := c.send(ctx, http.MethodPost, AgreementsPath, string(body), idempotencyKey)
+		if err != nil {
+			return nil, err
+		}
+		return reply.agreement()
+	})
 }
 
 // GetAgreement reads one of your agreements.
@@ -220,12 +226,14 @@ func (c *Client) GetAgreement(ctx context.Context, agreementID string) (*Agreeme
 		return nil, err
 	}
 
-	// GET signs an EMPTY idempotency key and an EMPTY body.
-	reply, err := c.send(ctx, http.MethodGet, AgreementsPath+"/"+id, "", "")
-	if err != nil {
-		return nil, err
-	}
-	return reply.agreement()
+	return retry(ctx, c, c.retryPolicy("GetAgreement"), func() (*Agreement, error) {
+		// GET signs an EMPTY idempotency key and an EMPTY body.
+		reply, err := c.send(ctx, http.MethodGet, AgreementsPath+"/"+id, "", "")
+		if err != nil {
+			return nil, err
+		}
+		return reply.agreement()
+	})
 }
 
 // CancelAgreement cancels an agreement from pending, active or past_due: no
@@ -262,7 +270,8 @@ func (r *response) agreement() (*Agreement, error) {
 	}
 	agreement := &Agreement{Raw: r.data}
 	if !r.parsed || !isJSONObject(r.data) || json.Unmarshal(r.data, agreement) != nil || agreement.ID == "" {
-		return nil, newAPIError(r.status, "The API returned an unexpected agreement object")
+		return nil, r.apiError("The API returned an unexpected agreement object")
 	}
+	agreement.RequestID = r.requestID
 	return agreement, nil
 }

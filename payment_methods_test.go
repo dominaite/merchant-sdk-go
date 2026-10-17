@@ -324,18 +324,42 @@ func TestChargeErrorsWithoutDataHaveNoCharge(t *testing.T) {
 	}
 }
 
-// The generic statuses keep their generic errors, code and all.
-func TestAChargeAgainstAMethodThatIsNotYoursIsA404(t *testing.T) {
-	server, _ := newTestServer(t, chargeEnvelope(http.StatusNotFound, "PAYMENT_METHOD_NOT_FOUND", "No stored payment method with this id.", nil))
+// A coded 404 on the charge route is a charge error, like every other coded
+// answer of the route: a caller that catches *ChargeError sees all of them.
+func TestACoded404OnAChargeIsAChargeError(t *testing.T) {
+	for _, code := range []string{ChargeErrorPaymentMethodNotFound, ChargeErrorAgreementNotFound} {
+		t.Run(code, func(t *testing.T) {
+			server, _ := newTestServer(t, chargeEnvelope(http.StatusNotFound, code, "Not found.", nil))
+			client := newTestClient(t, server.URL)
+
+			_, err := client.ChargePaymentMethod(context.Background(), testPaymentMethodID, testChargeParams())
+			var chargeErr *ChargeError
+			if !errors.As(err, &chargeErr) {
+				t.Fatalf("got %T (%v), want *ChargeError", err, err)
+			}
+			if chargeErr.HTTPStatus != http.StatusNotFound || chargeErr.ErrorCode != code {
+				t.Fatalf("got %d %q, want 404 %s", chargeErr.HTTPStatus, chargeErr.ErrorCode, code)
+			}
+		})
+	}
+}
+
+// A 5xx that is not one of the charge route's own codes is the platform
+// failing, not a charge answer: a *TransportError that keeps the code.
+func TestAMiddleware500OnAChargeIsATransportErrorWithItsCode(t *testing.T) {
+	server, _ := newTestServer(t, reply{Status: http.StatusInternalServerError, Body: map[string]any{
+		"success": false,
+		"error":   map[string]any{"code": ErrorCodeInternalError, "message": "An unexpected error occurred", "statusCode": 500},
+	}})
 	client := newTestClient(t, server.URL)
 
 	_, err := client.ChargePaymentMethod(context.Background(), testPaymentMethodID, testChargeParams())
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("got %T (%v), want *APIError", err, err)
+	var transportErr *TransportError
+	if !errors.As(err, &transportErr) {
+		t.Fatalf("got %T (%v), want *TransportError", err, err)
 	}
-	if apiErr.HTTPStatus != http.StatusNotFound || apiErr.ErrorCode != "PAYMENT_METHOD_NOT_FOUND" {
-		t.Fatalf("got %d %q, want 404 PAYMENT_METHOD_NOT_FOUND", apiErr.HTTPStatus, apiErr.ErrorCode)
+	if transportErr.HTTPStatus != http.StatusInternalServerError || transportErr.ErrorCode != ErrorCodeInternalError {
+		t.Fatalf("got %d %q, want 500 %s", transportErr.HTTPStatus, transportErr.ErrorCode, ErrorCodeInternalError)
 	}
 }
 
@@ -488,5 +512,43 @@ func TestRevokePaymentMethodMapsA404AndACodeless5xx(t *testing.T) {
 	var transportErr *TransportError
 	if !errors.As(err, &transportErr) {
 		t.Fatalf("got %T (%v), want *TransportError", err, err)
+	}
+}
+
+// The gateway signs the lowercase pm_ id. An id typed in upper case is sent
+// and signed lowercase, on the charge and on the revoke, so it does not fail
+// with INVALID_SIGNATURE.
+func TestAnUppercasePaymentMethodIDIsSentAndSignedLowercase(t *testing.T) {
+	upper := strings.ToUpper(testPaymentMethodID)
+	lower := strings.ToLower(testPaymentMethodID)
+
+	server, calls := newTestServer(t, reply{Status: http.StatusCreated, Body: testCharge})
+	client := newTestClient(t, server.URL)
+	if _, err := client.ChargePaymentMethod(context.Background(), upper, testChargeParams()); err != nil {
+		t.Fatalf("ChargePaymentMethod: %v", err)
+	}
+	call := calls()[0]
+	path := PaymentMethodsPath + "/" + lower + "/charges"
+	if call.Path != path {
+		t.Fatalf("path = %s, want %s", call.Path, path)
+	}
+	want := Sign(SignInput{
+		Secret:         vector.Secret,
+		Timestamp:      call.Header.Get("X-Timestamp"),
+		Method:         http.MethodPost,
+		Path:           path,
+		IdempotencyKey: chargeVector.IdempotencyKey,
+		Body:           call.Body,
+	})
+	if got := call.Header.Get("X-Signature"); got != want {
+		t.Fatalf("X-Signature = %s, want the signature of %s", got, path)
+	}
+
+	server, calls = newTestServer(t, reply{Status: http.StatusNoContent, Body: ""})
+	if err := newTestClient(t, server.URL).RevokePaymentMethod(context.Background(), upper); err != nil {
+		t.Fatalf("RevokePaymentMethod: %v", err)
+	}
+	if got := calls()[0].Path; got != PaymentMethodsPath+"/"+lower {
+		t.Fatalf("revoke path = %s, want the lowercase id", got)
 	}
 }

@@ -2,8 +2,11 @@ package dominaite
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -93,5 +96,123 @@ func TestStorefrontMismatchOnReplayIsARefusal(t *testing.T) {
 	}
 	if refusal.TransactionID == "" {
 		t.Fatal("the replay refusal must carry the transaction id")
+	}
+}
+
+// Every error-code group of the wire contract is a vocabulary this SDK
+// exports, in the gateway's order. The wire contract is generated from the
+// live API, so a new code there fails this test before a merchant meets it.
+func TestErrorCodeVocabulariesMatchTheWireContract(t *testing.T) {
+	raw, err := os.ReadFile(wireContractPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", wireContractPath, err)
+	}
+	var wire struct {
+		ErrorCodes map[string][]wireErrorCode `json:"errorCodes"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("parse %s: %v", wireContractPath, err)
+	}
+
+	vocabularies := map[string][]string{
+		"auth":          AuthenticationErrorCodes,
+		"authorization": AuthorizationErrorCodes,
+		"idempotency":   IdempotencyErrorCodes,
+		"storefront":    StorefrontErrorCodes,
+		"transient":     TransientErrorCodes,
+		"validation":    ValidationErrorCodes,
+	}
+	for group, entries := range wire.ErrorCodes {
+		sdk, ok := vocabularies[group]
+		if !ok {
+			t.Errorf("the wire contract has an error-code group %q that this SDK does not export", group)
+			continue
+		}
+		var codes []string
+		for _, entry := range entries {
+			codes = append(codes, entry.Code)
+		}
+		if !reflect.DeepEqual(sdk, codes) {
+			t.Errorf("%s codes drifted from the gateway contract\n  sdk:     %v\n  gateway: %v", group, sdk, codes)
+		}
+	}
+	for group := range vocabularies {
+		if _, ok := wire.ErrorCodes[group]; !ok {
+			t.Errorf("the wire contract no longer has the error-code group %q", group)
+		}
+	}
+}
+
+// The route vocabularies the wire contract does not group yet, pinned to the
+// codes the gateway answers on each route, in its order. Each must also reach
+// the caller unchanged.
+func TestRouteErrorCodeVocabularies(t *testing.T) {
+	want := map[string][]string{
+		"charge": {
+			"PAYMENT_METHOD_NOT_ACTIVE", "DUPLICATE_REQUEST", "IDEMPOTENCY_KEY_REUSED",
+			"CHARGE_OUTCOME_UNKNOWN", "CHARGE_FAILED", "PAYMENT_METHOD_CHARGES_DISABLED",
+			"PAYMENT_PROCESSING_UNAVAILABLE", "PAYMENT_METHOD_NOT_FOUND", "CHARGE_IN_PROGRESS",
+			"CHARGE_CURRENCY_MISMATCH", "AGREEMENT_NOT_FOUND", "AGREEMENT_METHOD_MISMATCH",
+			"AGREEMENT_CONSENT_MISSING", "AGREEMENT_CURRENCY_MISMATCH", "AGREEMENT_AMOUNT_MISMATCH",
+			"CHARGE_AMOUNT_ABOVE_AGREEMENT", "AGREEMENT_PERIOD_ALREADY_CHARGED", "AGREEMENT_ENDED",
+			"AGREEMENT_NOT_STARTED", "CHARGE_AMOUNT_ABOVE_CAP",
+		},
+		"session refusal": {
+			"PAYMENT_PROCESSING_UNAVAILABLE", "DUPLICATE_REQUEST", "ALREADY_PROCESSED",
+			"IDEMPOTENCY_KEY_REUSED", "PRIOR_ATTEMPT_FAILED", "STOREFRONT_MISMATCH",
+			"AGREEMENT_NOT_FOUND", "AGREEMENT_NOT_PENDING", "AGREEMENT_AMOUNT_MISMATCH",
+			"AGREEMENT_CONSENT_REQUIRED", "AGREEMENT_SESSION_OPEN", "AGREEMENT_ALREADY_PAID",
+			"AGREEMENT_VARIABLE_AMOUNT_UNSUPPORTED", "SUBSCRIPTIONS_NOT_ENABLED",
+		},
+		"recurring": {
+			"PLAN_NOT_FOUND", "PLAN_NOT_ACTIVE", "AGREEMENT_NOT_FOUND", "AGREEMENT_ENDED",
+			"PAYMENT_METHOD_NOT_FOUND", "PAYMENT_METHOD_NOT_ACTIVE", "PAYMENT_METHOD_CURRENCY_MISMATCH",
+			"PAYMENT_METHOD_CURRENCY_UNKNOWN", "MAX_AMOUNT_BELOW_PLAN_AMOUNT", "AGREEMENT_CONSENT_REQUIRED",
+			"IDEMPOTENCY_KEY_REUSED",
+		},
+		"webhook": {
+			"WEBHOOK_NOT_FOUND", "WEBHOOK_LIMIT_REACHED", "WEBHOOK_ALREADY_REGISTERED",
+			"WEBHOOK_URL_REJECTED", "IDEMPOTENCY_KEY_REUSED", "DUPLICATE_REQUEST",
+		},
+	}
+	got := map[string][]string{
+		"charge":          ChargeErrorCodes,
+		"session refusal": SessionRefusalErrorCodes,
+		"recurring":       RecurringErrorCodes,
+		"webhook":         WebhookErrorCodes,
+	}
+	for name, codes := range want {
+		if !reflect.DeepEqual(got[name], codes) {
+			t.Errorf("%s codes\n  sdk:     %v\n  gateway: %v", name, got[name], codes)
+		}
+	}
+}
+
+// Every 4xx charge code arrives as a *ChargeError with the code, and every
+// session refusal code as a *RefusalError.
+func TestEveryRouteCodeReachesTheCaller(t *testing.T) {
+	for _, code := range ChargeErrorCodes {
+		if containsCode(chargeServerErrorCodes, code) {
+			continue
+		}
+		t.Run("charge/"+code, func(t *testing.T) {
+			server, _ := newTestServer(t, chargeEnvelope(http.StatusUnprocessableEntity, code, "refused", nil))
+			_, err := newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), testPaymentMethodID, testChargeParams())
+			var chargeErr *ChargeError
+			if !errors.As(err, &chargeErr) || chargeErr.ErrorCode != code {
+				t.Fatalf("got %T (%v), want *ChargeError %s", err, err, code)
+			}
+		})
+	}
+	for _, code := range SessionRefusalErrorCodes {
+		t.Run("session/"+code, func(t *testing.T) {
+			server, _ := newTestServer(t, reply{Body: map[string]any{"success": false, "errorCode": code, "errorMessage": "refused"}})
+			client := newTestClient(t, server.URL)
+			_, err := client.CreateCheckoutSession(context.Background(), testParams())
+			var refusal *RefusalError
+			if !errors.As(err, &refusal) || refusal.ErrorCode != code {
+				t.Fatalf("got %T (%v), want *RefusalError %s", err, err, code)
+			}
+		})
 	}
 }

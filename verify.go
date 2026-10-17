@@ -173,7 +173,31 @@ func VerifyWebhook(payload []byte, signatureHeader, secret string, opts ...Verif
 		event.Data.Raw = envelope.Data
 	}
 
+	event.Data.decodeTyped(event.Type)
+
 	return event, nil
+}
+
+// decodeTyped fills Charge on charge.* events and Agreement on agreement.*
+// events, from the verified data bytes. Data of an unexpected shape leaves
+// the typed field nil and stays on Raw: a correctly signed event never fails
+// because of its data.
+func (d *WebhookData) decodeTyped(eventType string) {
+	if len(d.Raw) == 0 || string(d.Raw) == "null" {
+		return
+	}
+	switch {
+	case strings.HasPrefix(eventType, "charge."):
+		charge := &ChargeWebhookData{Raw: d.Raw}
+		if json.Unmarshal(d.Raw, charge) == nil {
+			d.Charge = charge
+		}
+	case strings.HasPrefix(eventType, "agreement."):
+		agreement := &AgreementWebhookData{Raw: d.Raw}
+		if json.Unmarshal(d.Raw, agreement) == nil {
+			d.Agreement = agreement
+		}
+	}
 }
 
 // parseSignatureHeader splits "t={unix_seconds},v1={hex}" into the raw

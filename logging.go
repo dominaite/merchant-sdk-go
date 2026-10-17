@@ -32,7 +32,7 @@ const (
 // lines.
 //
 // Warnings are logged at slog.LevelWarn: an SDK notice from the API (once per
-// distinct value), a retry in CreateCheckoutSessionWithRetry, and a Ping clock
+// distinct value), each retry of the client's retry policy, and a Ping clock
 // skew above 60 seconds. No line ever holds the secret, the signature, the
 // cashier token, a query string or a request or response body.
 func WithLogger(logger *slog.Logger) Option {
@@ -62,7 +62,7 @@ func (c *Client) warn(ctx context.Context, message string) {
 
 // debugLine logs one request at debug level, only to a logger passed with
 // WithLogger. status is the HTTP status, or "error" on a transport failure.
-func (c *Client) debugLine(ctx context.Context, method, path, status string, header http.Header, idempotencyKey string, started time.Time) {
+func (c *Client) debugLine(ctx context.Context, method, path, status, requestID, idempotencyKey string, started time.Time) {
 	if c.logger == nil {
 		return
 	}
@@ -73,10 +73,8 @@ func (c *Client) debugLine(ctx context.Context, method, path, status string, hea
 	}
 
 	line := fmt.Sprintf("dominaite-go: %s %s %s %dms", method, path, status, time.Since(started).Milliseconds())
-	if header != nil {
-		if id := cleanHeaderValue(header.Get(RequestIDHeader), maxRequestIDLength); id != "" {
-			line += " request_id=" + id
-		}
+	if requestID != "" {
+		line += " request_id=" + requestID
 	}
 	if idempotencyKey != "" {
 		line += " idempotency_key=" + idempotencyKey
@@ -178,6 +176,11 @@ func retryReason(err error) string {
 			return e.ErrorCode
 		}
 		return "RefusalError"
+	case *ChargeError:
+		if e.ErrorCode != "" {
+			return e.ErrorCode
+		}
+		return "ChargeError"
 	case *TransportError:
 		return "TransportError"
 	}

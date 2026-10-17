@@ -68,6 +68,10 @@ type WebhookEndpoint struct {
 	// String keeps it out of %v.
 	Secret string `json:"-"`
 
+	// RequestID is the API's id of the call that returned this endpoint.
+	// Quote it to support. Empty when the API sent none.
+	RequestID string `json:"-"`
+
 	// Raw is the unparsed endpoint object, for fields this struct does not
 	// model yet. On the first answer to CreateWebhookEndpoint it holds the
 	// secret too: never log it.
@@ -97,9 +101,13 @@ func (e WebhookEndpoint) GoString() string { return e.String() }
 //
 // params.IdempotencyKey is required and signed. The same key with the same
 // URL and events answers the same endpoint without its secret, and registers
-// nothing new. After no answer, a timeout or a 503, retry with the SAME key:
-// the retry replaces an endpoint the lost attempt registered, and answers a
-// new id and a new secret. A retry with a new key cannot do that.
+// nothing new. After no answer, a timeout or a 503, retry with the SAME key.
+// When the first attempt never finished, the retry replaces the endpoint it
+// left and answers a new id and a new secret. When the endpoint was
+// registered and only its answer was lost, the retry answers that endpoint
+// with an empty Secret: delete it, then create it again with a new key. The
+// client never retries this call on its own, whatever WithMaxRetries says: a
+// retry can answer without the secret, so you decide when to send one.
 //
 // Errors it returns:
 //   - *ValidationError: an empty URL, no events, or a bad IdempotencyKey;
@@ -138,8 +146,9 @@ func (c *Client) CreateWebhookEndpoint(ctx context.Context, params CreateWebhook
 	}
 	endpoint, ok := decodeWebhookEndpoint(reply.data)
 	if !reply.parsed || !ok {
-		return nil, newAPIError(reply.status, "The API returned an unexpected webhook endpoint object")
+		return nil, reply.apiError("The API returned an unexpected webhook endpoint object")
 	}
+	endpoint.RequestID = reply.requestID
 	return endpoint, nil
 }
 
@@ -150,22 +159,27 @@ func (c *Client) CreateWebhookEndpoint(ctx context.Context, params CreateWebhook
 // Errors it returns: as CreateWebhookEndpoint, without the validation and
 // idempotency rules.
 func (c *Client) ListWebhookEndpoints(ctx context.Context) ([]WebhookEndpoint, error) {
-	// GET signs an EMPTY idempotency key and an EMPTY body.
-	reply, err := c.send(ctx, http.MethodGet, WebhooksPath, "", "")
-	if err != nil {
-		return nil, err
-	}
-	if reply.status >= 400 {
-		return nil, reply.rejection()
-	}
-	if !reply.parsed {
-		return nil, newAPIError(reply.status, "The API returned a non-JSON response")
-	}
-	endpoints, err := decodeItems(reply.data, func(endpoint *WebhookEndpoint, raw json.RawMessage) { endpoint.Raw = raw })
-	if err != nil {
-		return nil, newAPIError(reply.status, "The API returned an unexpected webhook endpoint list")
-	}
-	return endpoints, nil
+	return retry(ctx, c, c.retryPolicy("ListWebhookEndpoints"), func() ([]WebhookEndpoint, error) {
+		// GET signs an EMPTY idempotency key and an EMPTY body.
+		reply, err := c.send(ctx, http.MethodGet, WebhooksPath, "", "")
+		if err != nil {
+			return nil, err
+		}
+		if reply.status >= 400 {
+			return nil, reply.rejection()
+		}
+		if !reply.parsed {
+			return nil, reply.apiError("The API returned a non-JSON response")
+		}
+		endpoints, err := decodeItems(reply.data, func(endpoint *WebhookEndpoint, raw json.RawMessage) {
+			endpoint.Raw = raw
+			endpoint.RequestID = reply.requestID
+		})
+		if err != nil {
+			return nil, reply.apiError("The API returned an unexpected webhook endpoint list")
+		}
+		return endpoints, nil
+	})
 }
 
 // DeleteWebhookEndpoint deletes one of your webhook endpoints. It stops

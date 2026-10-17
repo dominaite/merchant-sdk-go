@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // captured is one record a test handler saw.
@@ -96,6 +97,7 @@ func newLoggedClient(t *testing.T, baseURL string, logger *slog.Logger) *Client 
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	client.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	return client
 }
 
@@ -232,9 +234,15 @@ func TestDebugLineOnATransportFailure(t *testing.T) {
 	if _, err := client.Ping(context.Background()); err == nil {
 		t.Fatal("want a transport error")
 	}
+	// One line per attempt: the first and the default two retries.
 	lines := messages(records(), slog.LevelDebug)
-	if len(lines) != 1 || !strings.HasPrefix(lines[0], "dominaite-go: GET "+PingPath+" error ") {
-		t.Fatalf("debug lines = %q", lines)
+	if len(lines) != defaultMaxRetries+1 {
+		t.Fatalf("debug lines = %q, want one per attempt", lines)
+	}
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "dominaite-go: GET "+PingPath+" error ") {
+			t.Fatalf("debug line = %q", line)
+		}
 	}
 }
 

@@ -323,18 +323,27 @@ func TestRefundErrorCodesMapToRefundError(t *testing.T) {
 }
 
 // A 5xx on a refund route means nothing was queued: a *TransportError, which
-// is retried with the same key, even when it carries a code.
+// is retried with the same key, even when it carries a code. The code stays on
+// the error.
 func TestRefundServerErrorsAreTransportErrors(t *testing.T) {
-	for _, r := range []reply{
-		{Status: http.StatusInternalServerError, Body: map[string]any{"success": false}},
-		chargeEnvelope(http.StatusInternalServerError, "INTERNAL_ERROR", "boom", nil),
-		{Status: http.StatusServiceUnavailable, Body: "<html>busy</html>"},
+	for _, tc := range []struct {
+		reply reply
+		code  string
+	}{
+		{reply{Status: http.StatusInternalServerError, Body: map[string]any{"success": false}}, ""},
+		{chargeEnvelope(http.StatusInternalServerError, "INTERNAL_ERROR", "boom", nil), ErrorCodeInternalError},
+		{chargeEnvelope(http.StatusServiceUnavailable, "MERCHANT_API_UNAVAILABLE", "later", nil), ErrorCodeMerchantAPIUnavailable},
+		{reply{Status: http.StatusServiceUnavailable, Body: "<html>busy</html>"}, ""},
 	} {
-		server, _ := newTestServer(t, r)
+		server, _ := newTestServer(t, tc.reply)
 		_, err := newTestClient(t, server.URL).CreateRefund(context.Background(), testRefundTransactionID, CreateRefundParams{IdempotencyKey: testRefundKey})
 		var transportErr *TransportError
 		if !errors.As(err, &transportErr) {
-			t.Errorf("HTTP %d: got %T (%v), want *TransportError", r.Status, err, err)
+			t.Errorf("HTTP %d: got %T (%v), want *TransportError", tc.reply.Status, err, err)
+			continue
+		}
+		if transportErr.HTTPStatus != tc.reply.Status || transportErr.ErrorCode != tc.code {
+			t.Errorf("HTTP %d: got HTTP %d %q, want %q", tc.reply.Status, transportErr.HTTPStatus, transportErr.ErrorCode, tc.code)
 		}
 	}
 }

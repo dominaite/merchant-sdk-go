@@ -547,8 +547,11 @@ func TestChargeVocabulariesMatchContract(t *testing.T) {
 	if !reflect.DeepEqual(DeclineClasses, contract.DeclineClassVocabulary) {
 		t.Errorf("DeclineClasses = %v, contract says %v", DeclineClasses, contract.DeclineClassVocabulary)
 	}
-	if !reflect.DeepEqual(ChargeErrorCodes, contract.ChargeErrorCodes) {
-		t.Errorf("ChargeErrorCodes = %v, contract says %v", ChargeErrorCodes, contract.ChargeErrorCodes)
+	// The hand-maintained contract names the first seven codes only. The
+	// rest of the route's codes follow them, pinned in error_codes_test.go.
+	if len(ChargeErrorCodes) < len(contract.ChargeErrorCodes) ||
+		!reflect.DeepEqual(ChargeErrorCodes[:len(contract.ChargeErrorCodes)], contract.ChargeErrorCodes) {
+		t.Errorf("ChargeErrorCodes = %v, contract says it starts with %v", ChargeErrorCodes, contract.ChargeErrorCodes)
 	}
 	if !reflect.DeepEqual(RevokeErrorCodes, contract.RevokeErrorCodes) {
 		t.Errorf("RevokeErrorCodes = %v, contract says %v", RevokeErrorCodes, contract.RevokeErrorCodes)
@@ -833,7 +836,7 @@ func TestChargeErrorExamplesMatchContract(t *testing.T) {
 			})
 		})
 	}
-	for _, code := range ChargeErrorCodes {
+	for _, code := range contract.ChargeErrorCodes {
 		if !seen[code] {
 			t.Errorf("the fixture has no error example for %s", code)
 		}
@@ -842,17 +845,18 @@ func TestChargeErrorExamplesMatchContract(t *testing.T) {
 		t.Errorf("first error example is %s, want CHARGE_OUTCOME_UNKNOWN with a transaction to poll", first.Code)
 	}
 
-	// 404: an id that is not yours stays the generic *APIError, code and all.
+	// 404 with a code: an id that is not yours is a charge error, code and all.
 	notFound := endpoint.NotFoundExample
 	if notFound == nil {
 		t.Fatal("the contract has no charge notFoundExample")
 	}
 	server, _ := newTestServer(t, reply{Status: notFound.HTTPStatus, Body: string(notFound.Body)})
 	_, err := newTestClient(t, server.URL).ChargePaymentMethod(context.Background(), paymentMethodID, params)
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.HTTPStatus != 404 || apiErr.ErrorCode != notFound.Code {
-		t.Errorf("got %T (%v), want *APIError 404 %s", err, err, notFound.Code)
+	var notFoundErr *ChargeError
+	if !errors.As(err, &notFoundErr) || notFoundErr.HTTPStatus != 404 || notFoundErr.ErrorCode != notFound.Code {
+		t.Errorf("got %T (%v), want *ChargeError 404 %s", err, err, notFound.Code)
 	}
+	var apiErr *APIError
 
 	// A 5xx without the gateway's envelope is the platform being down, not a
 	// charge error; a 2xx without a charge body is not a charge either.
