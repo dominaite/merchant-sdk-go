@@ -110,6 +110,8 @@ func newTestClient(t *testing.T, baseURL string) *Client {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// Keep the default retry budget, without the waits.
+	client.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	return client
 }
 

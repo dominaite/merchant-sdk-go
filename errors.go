@@ -449,8 +449,8 @@ type AuthError struct {
 //
 // The SDK does NOT retry this for you, on purpose. A client that retries into a
 // rate limit makes the queue longer for everyone, and only your code knows
-// whether this payment can wait. CreateCheckoutSessionWithRetry returns it
-// immediately too. When you do retry, reuse the SAME idempotency key: the
+// whether this payment can wait. The client's retry policy (WithMaxRetries)
+// returns it at once. When you do retry, reuse the SAME idempotency key: the
 // request may have been rejected at the edge, but that is not guaranteed.
 //
 // RetryAfterSeconds carries the Retry-After header when the API sent one as

@@ -205,11 +205,13 @@ func (c *Client) CreateAgreement(ctx context.Context, params CreateAgreementPara
 		return nil, newValidationError("Request parameters are not JSON-encodable: " + err.Error())
 	}
 
-	reply, err := c.send(ctx, http.MethodPost, AgreementsPath, string(body), idempotencyKey)
-	if err != nil {
-		return nil, err
-	}
-	return reply.agreement()
+	return retry(ctx, c, c.retryPolicy("CreateAgreement"), func() (*Agreement, error) {
+		reply, err := c.send(ctx, http.MethodPost, AgreementsPath, string(body), idempotencyKey)
+		if err != nil {
+			return nil, err
+		}
+		return reply.agreement()
+	})
 }
 
 // GetAgreement reads one of your agreements.
@@ -224,12 +226,14 @@ func (c *Client) GetAgreement(ctx context.Context, agreementID string) (*Agreeme
 		return nil, err
 	}
 
-	// GET signs an EMPTY idempotency key and an EMPTY body.
-	reply, err := c.send(ctx, http.MethodGet, AgreementsPath+"/"+id, "", "")
-	if err != nil {
-		return nil, err
-	}
-	return reply.agreement()
+	return retry(ctx, c, c.retryPolicy("GetAgreement"), func() (*Agreement, error) {
+		// GET signs an EMPTY idempotency key and an EMPTY body.
+		reply, err := c.send(ctx, http.MethodGet, AgreementsPath+"/"+id, "", "")
+		if err != nil {
+			return nil, err
+		}
+		return reply.agreement()
+	})
 }
 
 // CancelAgreement cancels an agreement from pending, active or past_due: no

@@ -103,7 +103,9 @@ func (e WebhookEndpoint) GoString() string { return e.String() }
 // URL and events answers the same endpoint without its secret, and registers
 // nothing new. After no answer, a timeout or a 503, retry with the SAME key:
 // the retry replaces an endpoint the lost attempt registered, and answers a
-// new id and a new secret. A retry with a new key cannot do that.
+// new id and a new secret. A retry with a new key cannot do that. The client
+// never retries this call on its own, whatever WithMaxRetries says: a retry
+// changes the secret, so you decide when to send one.
 //
 // Errors it returns:
 //   - *ValidationError: an empty URL, no events, or a bad IdempotencyKey;
@@ -155,25 +157,27 @@ func (c *Client) CreateWebhookEndpoint(ctx context.Context, params CreateWebhook
 // Errors it returns: as CreateWebhookEndpoint, without the validation and
 // idempotency rules.
 func (c *Client) ListWebhookEndpoints(ctx context.Context) ([]WebhookEndpoint, error) {
-	// GET signs an EMPTY idempotency key and an EMPTY body.
-	reply, err := c.send(ctx, http.MethodGet, WebhooksPath, "", "")
-	if err != nil {
-		return nil, err
-	}
-	if reply.status >= 400 {
-		return nil, reply.rejection()
-	}
-	if !reply.parsed {
-		return nil, reply.apiError("The API returned a non-JSON response")
-	}
-	endpoints, err := decodeItems(reply.data, func(endpoint *WebhookEndpoint, raw json.RawMessage) {
-		endpoint.Raw = raw
-		endpoint.RequestID = reply.requestID
+	return retry(ctx, c, c.retryPolicy("ListWebhookEndpoints"), func() ([]WebhookEndpoint, error) {
+		// GET signs an EMPTY idempotency key and an EMPTY body.
+		reply, err := c.send(ctx, http.MethodGet, WebhooksPath, "", "")
+		if err != nil {
+			return nil, err
+		}
+		if reply.status >= 400 {
+			return nil, reply.rejection()
+		}
+		if !reply.parsed {
+			return nil, reply.apiError("The API returned a non-JSON response")
+		}
+		endpoints, err := decodeItems(reply.data, func(endpoint *WebhookEndpoint, raw json.RawMessage) {
+			endpoint.Raw = raw
+			endpoint.RequestID = reply.requestID
+		})
+		if err != nil {
+			return nil, reply.apiError("The API returned an unexpected webhook endpoint list")
+		}
+		return endpoints, nil
 	})
-	if err != nil {
-		return nil, reply.apiError("The API returned an unexpected webhook endpoint list")
-	}
-	return endpoints, nil
 }
 
 // DeleteWebhookEndpoint deletes one of your webhook endpoints. It stops

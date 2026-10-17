@@ -191,11 +191,13 @@ func (c *Client) CreatePlan(ctx context.Context, params CreatePlanParams) (*Plan
 		return nil, newValidationError("Request parameters are not JSON-encodable: " + err.Error())
 	}
 
-	reply, err := c.send(ctx, http.MethodPost, PlansPath, string(body), idempotencyKey)
-	if err != nil {
-		return nil, err
-	}
-	return reply.plan()
+	return retry(ctx, c, c.retryPolicy("CreatePlan"), func() (*Plan, error) {
+		reply, err := c.send(ctx, http.MethodPost, PlansPath, string(body), idempotencyKey)
+		if err != nil {
+			return nil, err
+		}
+		return reply.plan()
+	})
 }
 
 // ListPlans lists your plans: at most 200, active first, newest first within
@@ -205,26 +207,28 @@ func (c *Client) CreatePlan(ctx context.Context, params CreatePlanParams) (*Plan
 // Errors it returns: *AuthError, *RateLimitError, *TransportError, and an
 // *APIError for any other rejection.
 func (c *Client) ListPlans(ctx context.Context) ([]Plan, error) {
-	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
-	// Idempotency-Key header.
-	reply, err := c.send(ctx, http.MethodGet, PlansPath, "", "")
-	if err != nil {
-		return nil, err
-	}
-	if reply.status >= 400 {
-		return nil, reply.rejection()
-	}
-	if !reply.parsed {
-		return nil, reply.apiError("The API returned a non-JSON response")
-	}
-	plans, err := decodeItems(reply.data, func(plan *Plan, raw json.RawMessage) {
-		plan.Raw = raw
-		plan.RequestID = reply.requestID
+	return retry(ctx, c, c.retryPolicy("ListPlans"), func() ([]Plan, error) {
+		// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
+		// Idempotency-Key header.
+		reply, err := c.send(ctx, http.MethodGet, PlansPath, "", "")
+		if err != nil {
+			return nil, err
+		}
+		if reply.status >= 400 {
+			return nil, reply.rejection()
+		}
+		if !reply.parsed {
+			return nil, reply.apiError("The API returned a non-JSON response")
+		}
+		plans, err := decodeItems(reply.data, func(plan *Plan, raw json.RawMessage) {
+			plan.Raw = raw
+			plan.RequestID = reply.requestID
+		})
+		if err != nil {
+			return nil, reply.apiError("The API returned an unexpected plan list")
+		}
+		return plans, nil
 	})
-	if err != nil {
-		return nil, reply.apiError("The API returned an unexpected plan list")
-	}
-	return plans, nil
 }
 
 // GetPlan reads one of your plans.
@@ -239,11 +243,13 @@ func (c *Client) GetPlan(ctx context.Context, planID string) (*Plan, error) {
 		return nil, err
 	}
 
-	reply, err := c.send(ctx, http.MethodGet, PlansPath+"/"+id, "", "")
-	if err != nil {
-		return nil, err
-	}
-	return reply.plan()
+	return retry(ctx, c, c.retryPolicy("GetPlan"), func() (*Plan, error) {
+		reply, err := c.send(ctx, http.MethodGet, PlansPath+"/"+id, "", "")
+		if err != nil {
+			return nil, err
+		}
+		return reply.plan()
+	})
 }
 
 // UpdatePlan changes a plan's name, its trial for agreements created from now

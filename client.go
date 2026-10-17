@@ -33,7 +33,6 @@ package dominaite
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -133,6 +132,9 @@ type Client struct {
 	optionErr  error
 	logger     *slog.Logger // nil: warnings go to slog.Default(), no debug lines
 	notices    *noticeSet
+	maxRetries int
+	sleep      func(context.Context, time.Duration) error // the wait between retries
+	random     func() float64                             // [0, 1), for the retry jitter
 }
 
 // String keeps the secret out of your logs. Printing a Client with %v, %+v or
@@ -261,6 +263,9 @@ func New(keyID, secret string, opts ...Option) (*Client, error) {
 		userAgent:  sdkUserAgent(),
 		now:        time.Now,
 		notices:    &noticeSet{},
+		maxRetries: defaultMaxRetries,
+		sleep:      sleepContext,
+		random:     randomFloat,
 	}
 	for _, opt := range opts {
 		opt(client)
@@ -334,26 +339,28 @@ func isLoopbackHost(host string) bool {
 // Errors it returns:
 //   - *AuthError: wrong credentials, bad signature, clock off, IP not allowlisted.
 //   - *APIError: an unexpected or rejecting response; inspect HTTPStatus.
-//   - *RateLimitError: HTTP 429; back off, the SDK does not retry it for you.
+//   - *RateLimitError: HTTP 429; back off, the SDK never retries it for you.
 //   - *TransportError: network failure or 5xx.
 func (c *Client) Ping(ctx context.Context) (*Ping, error) {
-	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
-	// Idempotency-Key header.
-	reply, err := c.request(ctx, http.MethodGet, PingPath, "", "")
-	if err != nil {
-		return nil, err
-	}
+	return retry(ctx, c, c.retryPolicy("Ping"), func() (*Ping, error) {
+		// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
+		// Idempotency-Key header.
+		reply, err := c.request(ctx, http.MethodGet, PingPath, "", "")
+		if err != nil {
+			return nil, err
+		}
 
-	ping := &Ping{Raw: reply.payload}
-	if err := json.Unmarshal(reply.payload, ping); err != nil {
-		return nil, reply.apiError("The API returned an unexpected ping response")
-	}
-	ping.RequestID = reply.requestID
-	if skew := ping.ClockSkewSeconds; skew > clockSkewWarnSeconds || skew < -clockSkewWarnSeconds {
-		c.warn(ctx, fmt.Sprintf("dominaite-go: clock skew is %d s; requests fail at 300 s. Sync this server's clock.", skew))
-	}
+		ping := &Ping{Raw: reply.payload}
+		if err := json.Unmarshal(reply.payload, ping); err != nil {
+			return nil, reply.apiError("The API returned an unexpected ping response")
+		}
+		ping.RequestID = reply.requestID
+		if skew := ping.ClockSkewSeconds; skew > clockSkewWarnSeconds || skew < -clockSkewWarnSeconds {
+			c.warn(ctx, fmt.Sprintf("dominaite-go: clock skew is %d s; requests fail at 300 s. Sync this server's clock.", skew))
+		}
 
-	return ping, nil
+		return ping, nil
+	})
 }
 
 // GetIntegrationContract reads the API's machine-readable contract: its
@@ -365,20 +372,22 @@ func (c *Client) Ping(ctx context.Context) (*Ping, error) {
 //
 // Errors it returns: as Ping.
 func (c *Client) GetIntegrationContract(ctx context.Context) (*IntegrationContract, error) {
-	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
-	// Idempotency-Key header.
-	reply, err := c.request(ctx, http.MethodGet, IntegrationContractPath, "", "")
-	if err != nil {
-		return nil, err
-	}
+	return retry(ctx, c, c.retryPolicy("GetIntegrationContract"), func() (*IntegrationContract, error) {
+		// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
+		// Idempotency-Key header.
+		reply, err := c.request(ctx, http.MethodGet, IntegrationContractPath, "", "")
+		if err != nil {
+			return nil, err
+		}
 
-	contract := &IntegrationContract{Raw: reply.payload}
-	if err := json.Unmarshal(reply.payload, contract); err != nil || contract.Version == "" {
-		return nil, reply.apiError("The API returned an unexpected contract response")
-	}
-	contract.RequestID = reply.requestID
+		contract := &IntegrationContract{Raw: reply.payload}
+		if err := json.Unmarshal(reply.payload, contract); err != nil || contract.Version == "" {
+			return nil, reply.apiError("The API returned an unexpected contract response")
+		}
+		contract.RequestID = reply.requestID
 
-	return contract, nil
+		return contract, nil
+	})
 }
 
 // CreateCheckoutSession opens a hosted checkout session for one payment. With
@@ -395,16 +404,31 @@ func (c *Client) GetIntegrationContract(ctx context.Context) (*IntegrationContra
 //   - *RefusalError: the gateway refused the session; inspect ErrorCode.
 //   - *APIError: an unexpected or rejecting response; inspect HTTPStatus.
 //   - *RateLimitError: HTTP 429; back off and reschedule with the same
-//     idempotency key. Not retried for you, by CreateCheckoutSessionWithRetry
-//     either.
-//   - *TransportError: network failure or 5xx. Safe to retry WITH the same
-//     idempotency key, which is what CreateCheckoutSessionWithRetry does.
+//     idempotency key. Never retried for you.
+//   - *TransportError: network failure or 5xx, after the client's retries
+//     (WithMaxRetries) ran out. Safe to retry WITH the same idempotency key.
+//
+// The client retries a *TransportError and PAYMENT_PROCESSING_UNAVAILABLE
+// with the same idempotency key and body; see WithMaxRetries. A retry after
+// an attempt that DID land gets that session back while it is still open.
+// When the earlier attempt already moved money, ended, or cannot be handed
+// back yet, the API answers with a replay refusal (*RefusalError, ErrorCode
+// ALREADY_PROCESSED, PRIOR_ATTEMPT_FAILED or DUPLICATE_REQUEST). Recover
+// through RefusalError.TransactionID with GetStatus when the API named one.
 func (c *Client) CreateCheckoutSession(ctx context.Context, params CreateCheckoutSessionParams) (*CheckoutSession, error) {
 	idempotencyKey, body, err := prepareSessionRequest(params)
 	if err != nil {
 		return nil, err
 	}
 
+	return retry(ctx, c, c.retryPolicy("CreateCheckoutSession"), func() (*CheckoutSession, error) {
+		return c.sendCheckoutSession(ctx, idempotencyKey, body)
+	})
+}
+
+// sendCheckoutSession sends one create-session attempt. A refusal arrives as
+// HTTP 200 and becomes a *RefusalError.
+func (c *Client) sendCheckoutSession(ctx context.Context, idempotencyKey, body string) (*CheckoutSession, error) {
 	reply, err := c.request(ctx, http.MethodPost, SessionsPath, body, idempotencyKey)
 	if err != nil {
 		return nil, err
@@ -445,110 +469,55 @@ func (c *Client) CreateCheckoutSession(ctx context.Context, params CreateCheckou
 }
 
 // RetryOptions tunes CreateCheckoutSessionWithRetry.
+//
+// Deprecated: set the retry budget on the client with WithMaxRetries;
+// CreateCheckoutSession retries on its own.
 type RetryOptions struct {
 	// Attempts is the total number of attempts including the first. Zero means
-	// the default of 3.
+	// the client's policy: WithMaxRetries plus the first attempt, 3 by default.
 	Attempts int
-	// BaseDelay is the wait before the first retry; it doubles each attempt.
+	// BaseDelay bounds the wait before the first retry, which is a random time
+	// between 0 and BaseDelay; the bound doubles each retry, up to 8 seconds.
 	// Zero means the default of 500ms.
 	BaseDelay time.Duration
 }
 
-func (o RetryOptions) withDefaults() (int, time.Duration, error) {
-	attempts := o.Attempts
-	if attempts == 0 {
-		attempts = 3
+func (c *Client) sessionRetryPolicy(o RetryOptions) (retryPolicy, error) {
+	policy := c.retryPolicy("CreateCheckoutSessionWithRetry")
+	if o.Attempts < 0 {
+		return policy, newValidationError("Attempts must be a positive integer")
 	}
-	if attempts < 1 {
-		return 0, 0, newValidationError("Attempts must be a positive integer")
+	if o.Attempts > 0 {
+		policy.maxRetries = o.Attempts - 1
 	}
-
-	baseDelay := o.BaseDelay
-	if baseDelay == 0 {
-		baseDelay = 500 * time.Millisecond
+	if o.BaseDelay < 0 {
+		return policy, newValidationError("BaseDelay must not be negative")
 	}
-	if baseDelay < 0 {
-		return 0, 0, newValidationError("BaseDelay must not be negative")
+	if o.BaseDelay > 0 {
+		policy.baseDelay = o.BaseDelay
 	}
-
-	return attempts, baseDelay, nil
+	return policy, nil
 }
 
-// CreateCheckoutSessionWithRetry creates a session, retrying *TransportError
-// and PAYMENT_PROCESSING_UNAVAILABLE, with THE SAME idempotency key across
+// CreateCheckoutSessionWithRetry is CreateCheckoutSession with its own retry
+// budget. It retries the same failures, with THE SAME idempotency key across
 // every attempt.
 //
-// Reusing the key is what makes the retry safe. A transport failure leaves you
-// not knowing whether the request landed; a key the API has already seen is
-// refused instead of opening a second session. Generating a fresh key per
-// attempt would be exactly the double-charge bug this method exists to
-// prevent, so the key is pinned once before the first attempt.
-//
-// A retry after the first attempt DID land gets that session back while it is
-// still open: same TransactionID, same cashier handles. When the earlier
-// attempt already moved money, ended, or cannot be handed back yet, the API
-// answers with a replay refusal (*RefusalError, ErrorCode ALREADY_PROCESSED,
-// PRIOR_ATTEMPT_FAILED or DUPLICATE_REQUEST). Recover through
-// RefusalError.TransactionID with GetStatus when the API named one.
-//
-// params.IdempotencyKey is required here as everywhere: the SDK never invents
-// one. Derive it with OrderIdempotencyKey.
-//
-// PAYMENT_PROCESSING_UNAVAILABLE is retried in both of its forms: a 503 (a
-// *TransportError like any 5xx) and the HTTP 200 refusal the session route
-// answers with (a *RefusalError). Either way nothing was minted and the
-// gateway asks for a retry with the same key. If it is still unavailable
-// after the last attempt, that refusal is what you get back.
-//
-// Every other refusal, and authentication failures, are returned immediately.
-// They will not change on a retry.
-//
-// Rate limits (*RateLimitError) are returned immediately too. Retrying into a
-// full queue lengthens it; back off for RetryAfterSeconds and reschedule with
-// the same idempotency key.
+// Deprecated: CreateCheckoutSession retries on its own; set the budget with
+// WithMaxRetries. This method stays for existing callers.
 func (c *Client) CreateCheckoutSessionWithRetry(ctx context.Context, params CreateCheckoutSessionParams, opts RetryOptions) (*CheckoutSession, error) {
-	attempts, baseDelay, err := opts.withDefaults()
+	policy, err := c.sessionRetryPolicy(opts)
+	if err != nil {
+		return nil, err
+	}
+	idempotencyKey, body, err := prepareSessionRequest(params)
 	if err != nil {
 		return nil, err
 	}
 
-	var lastErr error
-	for attempt := 0; attempt < attempts; attempt++ {
-		session, err := c.CreateCheckoutSession(ctx, params)
-		if err == nil {
-			return session, nil
-		}
-
-		if !isRetryable(err) {
-			return nil, err
-		}
-		lastErr = err
-
-		if attempt == attempts-1 {
-			break
-		}
-		c.warn(ctx, fmt.Sprintf("dominaite-go: retrying CreateCheckoutSessionWithRetry after %s (attempt %d of %d)",
-			retryReason(err), attempt+2, attempts))
-		select {
-		case <-ctx.Done():
-			return nil, newTransportError("Retrying was cancelled: "+ctx.Err().Error(), ctx.Err())
-		case <-time.After(baseDelay << attempt):
-		}
-	}
-
-	return nil, lastErr
-}
-
-// isRetryable names the failures CreateCheckoutSessionWithRetry retries: a
-// transport failure or 5xx, and the refusal saying card processing is
-// unavailable right now. Both leave nothing minted.
-func isRetryable(err error) bool {
-	var transportErr *TransportError
-	if errors.As(err, &transportErr) {
-		return true
-	}
-	var refusal *RefusalError
-	return errors.As(err, &refusal) && refusal.ErrorCode == ErrorCodePaymentProcessingUnavailable
+	return retry(ctx, c, policy, func() (*CheckoutSession, error) {
+		return c.sendCheckoutSession(ctx, idempotencyKey, body)
+	})
 }
 
 // GetStatus reads the payment status of one of your checkout sessions.
@@ -584,20 +553,22 @@ func (c *Client) GetStatus(ctx context.Context, transactionID string) (*Checkout
 		return nil, err
 	}
 
-	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
-	// Idempotency-Key header.
-	reply, err := c.request(ctx, http.MethodGet, SessionsPath+"/"+normalized, "", "")
-	if err != nil {
-		return nil, err
-	}
+	return retry(ctx, c, c.retryPolicy("GetStatus"), func() (*CheckoutStatus, error) {
+		// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
+		// Idempotency-Key header.
+		reply, err := c.request(ctx, http.MethodGet, SessionsPath+"/"+normalized, "", "")
+		if err != nil {
+			return nil, err
+		}
 
-	status := &CheckoutStatus{Raw: reply.payload}
-	if err := json.Unmarshal(reply.payload, status); err != nil {
-		return nil, reply.apiError("The API returned an unexpected status response")
-	}
-	status.RequestID = reply.requestID
+		status := &CheckoutStatus{Raw: reply.payload}
+		if err := json.Unmarshal(reply.payload, status); err != nil {
+			return nil, reply.apiError("The API returned an unexpected status response")
+		}
+		status.RequestID = reply.requestID
 
-	return status, nil
+		return status, nil
+	})
 }
 
 // ChargePaymentMethod charges a card kept on file, off-session: no widget, no
@@ -643,31 +614,33 @@ func (c *Client) ChargePaymentMethod(ctx context.Context, paymentMethodID string
 		return nil, err
 	}
 
-	reply, err := c.send(ctx, http.MethodPost, PaymentMethodsPath+"/"+id+"/charges", body, idempotencyKey)
-	if err != nil {
-		return nil, err
-	}
+	return retry(ctx, c, c.retryPolicy("ChargePaymentMethod"), func() (*PaymentMethodCharge, error) {
+		reply, err := c.send(ctx, http.MethodPost, PaymentMethodsPath+"/"+id+"/charges", body, idempotencyKey)
+		if err != nil {
+			return nil, err
+		}
 
-	charge := reply.charge()
-	code := reply.err.code()
+		charge := reply.charge()
+		code := reply.err.code()
 
-	// 201 (200 on a durable replay): the charge was placed, whatever its
-	// status. 402: the provider declined; the envelope says success=false but
-	// the charge is right there with Status failed, so it is a result, not an
-	// error.
-	if charge != nil && (reply.success() || reply.status == http.StatusPaymentRequired) {
-		return charge, nil
-	}
+		// 201 (200 on a durable replay): the charge was placed, whatever its
+		// status. 402: the provider declined; the envelope says success=false but
+		// the charge is right there with Status failed, so it is a result, not an
+		// error.
+		if charge != nil && (reply.success() || reply.status == http.StatusPaymentRequired) {
+			return charge, nil
+		}
 
-	if code != "" && isRouteErrorStatus(reply.status, code, chargeServerErrorCodes) {
-		chargeErr := newChargeError(reply.status, code, firstNonEmpty(reply.err.message(), "The charge was refused."), charge, reply.envelope)
-		chargeErr.RequestID = reply.requestID
-		return nil, chargeErr
-	}
-	if reply.status >= 400 {
-		return nil, reply.rejection()
-	}
-	return nil, reply.apiError("The API answered the charge without a charge body")
+		if code != "" && isRouteErrorStatus(reply.status, code, chargeServerErrorCodes) {
+			chargeErr := newChargeError(reply.status, code, firstNonEmpty(reply.err.message(), "The charge was refused."), charge, reply.envelope)
+			chargeErr.RequestID = reply.requestID
+			return nil, chargeErr
+		}
+		if reply.status >= 400 {
+			return nil, reply.rejection()
+		}
+		return nil, reply.apiError("The API answered the charge without a charge body")
+	})
 }
 
 // RevokePaymentMethod revokes a card kept on file. The saved credential is
@@ -748,11 +721,13 @@ func (c *Client) CreateRefund(ctx context.Context, transactionID string, params 
 		return nil, err
 	}
 
-	reply, err := c.send(ctx, http.MethodPost, PaymentsPath+"/"+id+"/refunds", body, idempotencyKey)
-	if err != nil {
-		return nil, err
-	}
-	return reply.refund()
+	return retry(ctx, c, c.retryPolicy("CreateRefund"), func() (*Refund, error) {
+		reply, err := c.send(ctx, http.MethodPost, PaymentsPath+"/"+id+"/refunds", body, idempotencyKey)
+		if err != nil {
+			return nil, err
+		}
+		return reply.refund()
+	})
 }
 
 // GetRefund reads one refund of a payment: its Status, the Amount refunded
@@ -775,13 +750,15 @@ func (c *Client) GetRefund(ctx context.Context, transactionID, refundID string) 
 		return nil, newValidationError("refundId must be the RefundID returned by CreateRefund")
 	}
 
-	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
-	// Idempotency-Key header.
-	reply, err := c.send(ctx, http.MethodGet, PaymentsPath+"/"+id+"/refunds/"+normalizedRefundID, "", "")
-	if err != nil {
-		return nil, err
-	}
-	return reply.refund()
+	return retry(ctx, c, c.retryPolicy("GetRefund"), func() (*Refund, error) {
+		// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
+		// Idempotency-Key header.
+		reply, err := c.send(ctx, http.MethodGet, PaymentsPath+"/"+id+"/refunds/"+normalizedRefundID, "", "")
+		if err != nil {
+			return nil, err
+		}
+		return reply.refund()
+	})
 }
 
 // ListRefunds lists the refunds of one payment that were created through this
@@ -802,46 +779,48 @@ func (c *Client) ListRefunds(ctx context.Context, transactionID string) (*Refund
 		return nil, err
 	}
 
-	// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
-	// Idempotency-Key header.
-	reply, err := c.send(ctx, http.MethodGet, PaymentsPath+"/"+id+"/refunds", "", "")
-	if err != nil {
-		return nil, err
-	}
-	if reply.status >= 400 {
-		return nil, reply.refundRejection()
-	}
-	if !reply.parsed || !isJSONObject(reply.data) {
-		return nil, reply.apiError("The API answered the refund list without a refund list body")
-	}
+	return retry(ctx, c, c.retryPolicy("ListRefunds"), func() (*RefundList, error) {
+		// GET signs an EMPTY idempotency key and an EMPTY body, and sends no
+		// Idempotency-Key header.
+		reply, err := c.send(ctx, http.MethodGet, PaymentsPath+"/"+id+"/refunds", "", "")
+		if err != nil {
+			return nil, err
+		}
+		if reply.status >= 400 {
+			return nil, reply.refundRejection()
+		}
+		if !reply.parsed || !isJSONObject(reply.data) {
+			return nil, reply.apiError("The API answered the refund list without a refund list body")
+		}
 
-	var wire struct {
-		TransactionID    string          `json:"transactionId"`
-		Currency         string          `json:"currency"`
-		RefundedAmount   int64           `json:"refundedAmount"`
-		RefundableAmount int64           `json:"refundableAmount"`
-		Refunds          json.RawMessage `json:"refunds"`
-	}
-	if json.Unmarshal(reply.data, &wire) != nil || wire.TransactionID == "" {
-		return nil, reply.apiError("The API returned an unexpected refund list")
-	}
-	refunds, err := decodeItems(wire.Refunds, func(refund *Refund, raw json.RawMessage) {
-		refund.Raw = raw
-		refund.RequestID = reply.requestID
+		var wire struct {
+			TransactionID    string          `json:"transactionId"`
+			Currency         string          `json:"currency"`
+			RefundedAmount   int64           `json:"refundedAmount"`
+			RefundableAmount int64           `json:"refundableAmount"`
+			Refunds          json.RawMessage `json:"refunds"`
+		}
+		if json.Unmarshal(reply.data, &wire) != nil || wire.TransactionID == "" {
+			return nil, reply.apiError("The API returned an unexpected refund list")
+		}
+		refunds, err := decodeItems(wire.Refunds, func(refund *Refund, raw json.RawMessage) {
+			refund.Raw = raw
+			refund.RequestID = reply.requestID
+		})
+		if err != nil {
+			return nil, reply.apiError("The API returned an unexpected refund in the refund list")
+		}
+
+		return &RefundList{
+			TransactionID:    wire.TransactionID,
+			Currency:         wire.Currency,
+			RefundedAmount:   wire.RefundedAmount,
+			RefundableAmount: wire.RefundableAmount,
+			Refunds:          refunds,
+			RequestID:        reply.requestID,
+			Raw:              reply.data,
+		}, nil
 	})
-	if err != nil {
-		return nil, reply.apiError("The API returned an unexpected refund in the refund list")
-	}
-
-	return &RefundList{
-		TransactionID:    wire.TransactionID,
-		Currency:         wire.Currency,
-		RefundedAmount:   wire.RefundedAmount,
-		RefundableAmount: wire.RefundableAmount,
-		Refunds:          refunds,
-		RequestID:        reply.requestID,
-		Raw:              reply.data,
-	}, nil
 }
 
 // decodeItems decodes a JSON array one element at a time, so every item keeps
