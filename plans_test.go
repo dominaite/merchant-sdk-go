@@ -335,6 +335,10 @@ func TestPlanUnavailableIsATransportError(t *testing.T) {
 	if !errors.As(err, &transportErr) {
 		t.Fatalf("got %v, want *TransportError", err)
 	}
+	// A coded 5xx keeps its code.
+	if transportErr.HTTPStatus != http.StatusServiceUnavailable || transportErr.ErrorCode != ErrorCodeMerchantAPIUnavailable || len(transportErr.Raw) == 0 {
+		t.Fatalf("got HTTP %d %q (Raw %d bytes), want 503 %s with Raw", transportErr.HTTPStatus, transportErr.ErrorCode, len(transportErr.Raw), ErrorCodeMerchantAPIUnavailable)
+	}
 }
 
 func TestPlanIDsMustBeOnePathSegment(t *testing.T) {

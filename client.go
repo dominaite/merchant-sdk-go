@@ -617,16 +617,16 @@ func (c *Client) GetStatus(ctx context.Context, transactionID string) (*Checkout
 //
 // Errors it returns:
 //   - *ValidationError: bad arguments; nothing was sent.
-//   - *ChargeError: 409, 422, 502 or 503 with a code; branch on ErrorCode.
+//   - *ChargeError: 404, 409, 422, 502 or 503 with a code; branch on
+//     ErrorCode. 404 PAYMENT_METHOD_NOT_FOUND is an id that is not yours.
 //     CHARGE_OUTCOME_UNKNOWN carries the charge row (Charge, TransactionID):
 //     poll GetStatus with it, never retry under a new key.
 //   - *AuthError: wrong credentials, bad signature, clock off, IP not allowlisted.
-//   - *APIError: 404 for an id that is not yours (ErrorCode
-//     PAYMENT_METHOD_NOT_FOUND), 400 validation, or an unexpected response;
-//     inspect HTTPStatus.
+//   - *APIError: 400 validation, or an unexpected response; inspect
+//     HTTPStatus.
 //   - *RateLimitError: HTTP 429; back off and reschedule with the same key.
-//   - *TransportError: network failure or a 5xx without a code. Safe to retry
-//     WITH the same key.
+//   - *TransportError: network failure or a 5xx without a charge code
+//     (ErrorCode keeps the code it had). Safe to retry WITH the same key.
 func (c *Client) ChargePaymentMethod(ctx context.Context, paymentMethodID string, params ChargePaymentMethodParams) (*PaymentMethodCharge, error) {
 	id, err := normalizePaymentMethodID(paymentMethodID)
 	if err != nil {
@@ -653,7 +653,7 @@ func (c *Client) ChargePaymentMethod(ctx context.Context, paymentMethodID string
 		return charge, nil
 	}
 
-	if code != "" && reply.status >= 400 && !isGenericFailureStatus(reply.status) {
+	if code != "" && isRouteErrorStatus(reply.status, code, chargeServerErrorCodes) {
 		return nil, newChargeError(reply.status, code, firstNonEmpty(reply.err.message(), "The charge was refused."), charge, reply.envelope)
 	}
 	if reply.status >= 400 {
@@ -692,7 +692,7 @@ func (c *Client) RevokePaymentMethod(ctx context.Context, paymentMethodID string
 	}
 
 	code := reply.err.code()
-	if code != "" && !isGenericFailureStatus(reply.status) {
+	if code != "" && reply.status != http.StatusNotFound && isRouteErrorStatus(reply.status, code, RevokeErrorCodes) {
 		return newRevokeError(reply.status, code, firstNonEmpty(reply.err.message(), "The revoke was refused."), reply.envelope)
 	}
 	return reply.rejection()
@@ -1097,20 +1097,32 @@ func (r *response) refundRejection() error {
 }
 
 // rejection is the generic reading of a failed reply: 5xx is the API being
-// unavailable, 4xx a rejection carrying the machine-readable code.
+// unavailable, 4xx a rejection carrying the machine-readable code. A 5xx
+// keeps its code too, on the *TransportError.
 func (r *response) rejection() error {
-	if r.status >= 500 {
-		return newTransportError(
-			fmt.Sprintf("The Dominaite API is unavailable (HTTP %d); retry with the same idempotency key.", r.status),
-			nil,
-		)
-	}
 	var inner struct {
 		ErrorCode    string `json:"errorCode"`
 		ErrorMessage string `json:"errorMessage"`
 	}
 	if r.parsed {
 		_ = json.Unmarshal(r.payload, &inner)
+	}
+	if r.status >= 500 {
+		code := firstNonEmpty(r.err.code(), inner.ErrorCode)
+		label := strconv.Itoa(r.status)
+		if code != "" {
+			label += " " + code
+		}
+		transportErr := newTransportError(
+			fmt.Sprintf("The Dominaite API is unavailable (HTTP %s); retry with the same idempotency key.", label),
+			nil,
+		)
+		transportErr.HTTPStatus = r.status
+		transportErr.ErrorCode = code
+		if r.parsed {
+			transportErr.Raw = r.envelope
+		}
+		return transportErr
 	}
 	apiErr := newAPIError(r.status, firstNonEmpty(inner.ErrorMessage, r.err.message(), "Request rejected"))
 	// Input rejections name a machine-readable code the same way refusals
@@ -1122,15 +1134,29 @@ func (r *response) rejection() error {
 	return apiErr
 }
 
-// isGenericFailureStatus names the statuses that keep their generic error on
-// every route: validation (400), authentication (401, 403), an id that is not
-// yours (404) and rate limiting (429). Any other failure that carries an error
-// code on a payment-method route is that route's typed error; without a code
-// a 5xx stays the retryable *TransportError.
-func isGenericFailureStatus(status int) bool {
+// isRouteErrorStatus decides whether a coded failure on a payment-method
+// route is that route's typed error. Validation (400), authentication (401,
+// 403) and rate limiting (429) keep their generic errors on every route. A
+// 5xx is the route's error only with one of the route's own 5xx codes;
+// anything else, the middleware's INTERNAL_ERROR included, stays the
+// retryable *TransportError with its code. Every other coded 4xx, a 404
+// included, is the route's error.
+func isRouteErrorStatus(status int, code string, serverCodes []string) bool {
 	switch status {
-	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusTooManyRequests:
-		return true
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+		return false
+	}
+	if status >= 500 {
+		return containsCode(serverCodes, code)
+	}
+	return status >= 400
+}
+
+func containsCode(codes []string, code string) bool {
+	for _, candidate := range codes {
+		if candidate == code {
+			return true
+		}
 	}
 	return false
 }

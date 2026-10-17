@@ -184,8 +184,9 @@ var SubscriptionSessionRefusalCodes = []string{
 // payment method or a MaxAmountPerPeriod without Consent) and
 // ErrorCodeIdempotencyKeyReused (422: the key was first used for a different
 // plan or agreement) arrive there too. The list is additive: treat a 4xx code
-// you do not know as not retryable. A 5xx is a *TransportError: nothing was
-// created, so retry with the same key.
+// you do not know as not retryable. A 5xx is a *TransportError, with the code
+// on TransportError.ErrorCode when there was one: nothing was created, so
+// retry with the same key.
 const (
 	// ErrorCodePlanNotFound (404): no plan with this id under your account.
 	// The plan_ id is case-sensitive; send it exactly as it was returned.
@@ -239,6 +240,33 @@ const (
 	ErrorCodeWebhookNotFound = "WEBHOOK_NOT_FOUND"
 )
 
+// RecurringErrorCodes are the codes of the plan and agreement routes, in the
+// gateway's own order. They arrive on APIError.ErrorCode.
+var RecurringErrorCodes = []string{
+	ErrorCodePlanNotFound,
+	ErrorCodePlanNotActive,
+	ErrorCodeAgreementNotFound,
+	ErrorCodeAgreementEnded,
+	ErrorCodePaymentMethodNotFound,
+	ErrorCodePaymentMethodNotActive,
+	ErrorCodePaymentMethodCurrencyMismatch,
+	ErrorCodePaymentMethodCurrencyUnknown,
+	ErrorCodeMaxAmountBelowPlanAmount,
+	ErrorCodeAgreementConsentRequired,
+	ErrorCodeIdempotencyKeyReused,
+}
+
+// WebhookErrorCodes are the codes of the webhook endpoint routes, in the
+// gateway's own order. They arrive on APIError.ErrorCode.
+var WebhookErrorCodes = []string{
+	ErrorCodeWebhookNotFound,
+	ErrorCodeWebhookLimitReached,
+	ErrorCodeWebhookAlreadyRegistered,
+	ErrorCodeWebhookURLRejected,
+	ErrorCodeIdempotencyKeyReused,
+	ErrorCodeDuplicateRequest,
+}
+
 // ErrorCodeInsufficientScope (HTTP 403, on every route that needs a scope):
 // the request was signed correctly, but the API key does not hold the scope
 // the route needs. It arrives as an *AuthError with HTTPStatus 403. A key's
@@ -264,6 +292,124 @@ const ErrorCodeVerifyOnlyNotEnabled = "VERIFY_ONLY_NOT_ENABLED"
 // None is retryable.
 var AuthorizationErrorCodes = []string{
 	ErrorCodeInsufficientScope,
+}
+
+// Authentication codes (HTTP 401), on AuthError.ErrorCode. None is
+// retryable: fix the key id, the secret, the server clock or the allowlist.
+const (
+	// ErrorCodeInvalidAPIKey: the key id is unknown, malformed or revoked, or
+	// it belongs to another environment.
+	ErrorCodeInvalidAPIKey = "INVALID_API_KEY"
+	// ErrorCodeInvalidSignature: the signature does not match. Check the
+	// secret and that the signed body is the body sent.
+	ErrorCodeInvalidSignature = "INVALID_SIGNATURE"
+	// ErrorCodeTimestampOutOfRange: X-Timestamp is more than 300 seconds
+	// from the server clock. Sync this server's clock.
+	ErrorCodeTimestampOutOfRange = "TIMESTAMP_OUT_OF_RANGE"
+	// ErrorCodeIPNotAllowed: the caller's IP address is not on the key's
+	// allowlist.
+	ErrorCodeIPNotAllowed = "IP_NOT_ALLOWED"
+)
+
+// AuthenticationErrorCodes are the HTTP 401 codes, in the gateway's own
+// order.
+var AuthenticationErrorCodes = []string{
+	ErrorCodeInvalidAPIKey,
+	ErrorCodeInvalidSignature,
+	ErrorCodeTimestampOutOfRange,
+	ErrorCodeIPNotAllowed,
+}
+
+// ErrorCodeIdempotencyKeyRequired (HTTP 400, every keyed write): the
+// Idempotency-Key header was missing or too long. The SDK refuses such a key
+// before sending, so this only arrives if something between you and the API
+// dropped the header.
+const ErrorCodeIdempotencyKeyRequired = "IDEMPOTENCY_KEY_REQUIRED"
+
+// IdempotencyErrorCodes are the idempotency codes, in the gateway's own
+// order: ErrorCodeIdempotencyKeyRequired (HTTP 400), then the replay
+// refusals of a session create (HTTP 200 with success false).
+var IdempotencyErrorCodes = []string{
+	ErrorCodeIdempotencyKeyRequired,
+	ErrorCodeDuplicateRequest,
+	ErrorCodeAlreadyProcessed,
+	ErrorCodePriorAttemptFailed,
+	ErrorCodeIdempotencyKeyReused,
+}
+
+// Transient codes: nothing was created and a retry with the SAME key can
+// succeed.
+const (
+	// ErrorCodeMerchantAPIUnavailable (HTTP 503): the API or a provider
+	// behind it is unavailable. A *TransportError carries it on ErrorCode; a
+	// revoke carries it on a *RevokeError.
+	ErrorCodeMerchantAPIUnavailable = "MERCHANT_API_UNAVAILABLE"
+	// ErrorCodeInternalError (HTTP 500): the API failed before it could
+	// answer. A *TransportError carries it on ErrorCode.
+	ErrorCodeInternalError = "INTERNAL_ERROR"
+)
+
+// TransientErrorCodes are the codes the gateway asks you to retry, in its
+// own order. The client retries both for you (see WithMaxRetries).
+var TransientErrorCodes = []string{
+	ErrorCodeMerchantAPIUnavailable,
+	ErrorCodePaymentProcessingUnavailable,
+}
+
+// SessionRefusalErrorCodes are every RefusalError.ErrorCode a session create
+// can answer with HTTP 200 and success false: the five replay and
+// availability codes of the published contract, ErrorCodeStorefrontMismatch
+// (a replay of a key minted for another storefront), then the
+// SubscriptionSessionRefusalCodes. Treat a code you do not know as not
+// retryable.
+var SessionRefusalErrorCodes = []string{
+	ErrorCodePaymentProcessingUnavailable,
+	ErrorCodeDuplicateRequest,
+	ErrorCodeAlreadyProcessed,
+	ErrorCodeIdempotencyKeyReused,
+	ErrorCodePriorAttemptFailed,
+	ErrorCodeStorefrontMismatch,
+	ErrorCodeAgreementNotFound,
+	ErrorCodeAgreementNotPending,
+	ErrorCodeAgreementAmountMismatch,
+	ErrorCodeAgreementConsentRequired,
+	ErrorCodeAgreementSessionOpen,
+	ErrorCodeAgreementAlreadyPaid,
+	ErrorCodeAgreementVariableAmountUnsupported,
+	ErrorCodeSubscriptionsNotEnabled,
+}
+
+// ErrorCodeValidationError (HTTP 400) is the envelope code of a request that
+// failed validation. error.validationErrors on APIError.Raw names each field
+// and its field code (the ValidationErrorCodes).
+const ErrorCodeValidationError = "VALIDATION_ERROR"
+
+// Field codes of a validation failure: the code of each entry in
+// error.validationErrors on APIError.Raw. A plan create also answers
+// ErrorCodeInvalidCurrency and ErrorCodeInvalidSelection as the envelope code.
+const (
+	ErrorCodeRequired         = "REQUIRED"
+	ErrorCodeMinValue         = "MIN_VALUE"
+	ErrorCodeMaxLength        = "MAX_LENGTH"
+	ErrorCodeInvalidFormat    = "INVALID_FORMAT"
+	ErrorCodeInvalidSelection = "INVALID_SELECTION"
+	ErrorCodeDateInFuture     = "DATE_IN_FUTURE"
+	ErrorCodeInvalidEmail     = "INVALID_EMAIL"
+	ErrorCodeInvalidCurrency  = "INVALID_CURRENCY"
+)
+
+// ValidationErrorCodes are the field codes of a validation failure, in the
+// gateway's own order. The list can grow: treat a code you do not know as a
+// rejected field.
+var ValidationErrorCodes = []string{
+	ErrorCodeRequired,
+	ErrorCodeMinValue,
+	ErrorCodeMaxLength,
+	ErrorCodeInvalidFormat,
+	ErrorCodeInvalidSelection,
+	ErrorCodeDateInFuture,
+	ErrorCodeInvalidEmail,
+	ErrorCodeInvalidCurrency,
 }
 
 // AuthError means the API refused the request before it did anything: HTTP 401
@@ -382,6 +528,46 @@ const (
 	// ChargeErrorProcessingUnavailable (503): nothing was charged; retry later
 	// with the SAME key.
 	ChargeErrorProcessingUnavailable = "PAYMENT_PROCESSING_UNAVAILABLE"
+
+	// ChargeErrorPaymentMethodNotFound (404): no stored payment method with
+	// this id under your account.
+	ChargeErrorPaymentMethodNotFound = "PAYMENT_METHOD_NOT_FOUND"
+	// ChargeErrorInProgress (409): another charge of this payment method is
+	// still running. Retry with the SAME key in a moment.
+	ChargeErrorInProgress = "CHARGE_IN_PROGRESS"
+	// ChargeErrorCurrencyMismatch (422): the currency is not the currency the
+	// card was saved in.
+	ChargeErrorCurrencyMismatch = "CHARGE_CURRENCY_MISMATCH"
+	// ChargeErrorAgreementNotFound (404): no agreement with the AgreementID
+	// under your account.
+	ChargeErrorAgreementNotFound = "AGREEMENT_NOT_FOUND"
+	// ChargeErrorAgreementMethodMismatch (422): the payment method is not the
+	// card of the agreement.
+	ChargeErrorAgreementMethodMismatch = "AGREEMENT_METHOD_MISMATCH"
+	// ChargeErrorAgreementConsentMissing (422): the agreement has no recorded
+	// consent, so it cannot be charged.
+	ChargeErrorAgreementConsentMissing = "AGREEMENT_CONSENT_MISSING"
+	// ChargeErrorAgreementCurrencyMismatch (422): the currency is not the
+	// agreement's currency.
+	ChargeErrorAgreementCurrencyMismatch = "AGREEMENT_CURRENCY_MISMATCH"
+	// ChargeErrorAgreementAmountMismatch (422): the amount is not the amount
+	// of a fixed agreement.
+	ChargeErrorAgreementAmountMismatch = "AGREEMENT_AMOUNT_MISMATCH"
+	// ChargeErrorAmountAboveAgreement (422): the amount is above the
+	// MaxAmountPerPeriod of a variable agreement.
+	ChargeErrorAmountAboveAgreement = "CHARGE_AMOUNT_ABOVE_AGREEMENT"
+	// ChargeErrorAgreementPeriodAlreadyCharged (422): this period of the
+	// agreement was already charged.
+	ChargeErrorAgreementPeriodAlreadyCharged = "AGREEMENT_PERIOD_ALREADY_CHARGED"
+	// ChargeErrorAgreementEnded (422): the agreement is cancelled, completed or
+	// failed.
+	ChargeErrorAgreementEnded = "AGREEMENT_ENDED"
+	// ChargeErrorAgreementNotStarted (422): the agreement is not active yet.
+	ChargeErrorAgreementNotStarted = "AGREEMENT_NOT_STARTED"
+	// ChargeErrorAmountAboveCap (422): the amount is above the per-charge cap
+	// of your account. error.params.amount and error.params.cap on Raw say
+	// both values.
+	ChargeErrorAmountAboveCap = "CHARGE_AMOUNT_ABOVE_CAP"
 )
 
 // StorefrontErrorCodes are the storefront codes a session create can be
@@ -396,8 +582,10 @@ var StorefrontErrorCodes = []string{
 	ErrorCodeStorefrontNotWhitelisted,
 }
 
-// ChargeErrorCodes is the complete v1 vocabulary of ChargeError.ErrorCode.
-// Unknown codes still arrive as a *ChargeError; branch on the ones you know.
+// ChargeErrorCodes is the complete v1 vocabulary of ChargeError.ErrorCode:
+// the seven codes of the published contract first, then the 404, 409 and 422
+// codes of the charge route. Unknown 4xx codes still arrive as a
+// *ChargeError; branch on the ones you know.
 var ChargeErrorCodes = []string{
 	ChargeErrorPaymentMethodNotActive,
 	ChargeErrorDuplicateRequest,
@@ -406,12 +594,34 @@ var ChargeErrorCodes = []string{
 	ChargeErrorFailed,
 	ChargeErrorChargesDisabled,
 	ChargeErrorProcessingUnavailable,
+	ChargeErrorPaymentMethodNotFound,
+	ChargeErrorInProgress,
+	ChargeErrorCurrencyMismatch,
+	ChargeErrorAgreementNotFound,
+	ChargeErrorAgreementMethodMismatch,
+	ChargeErrorAgreementConsentMissing,
+	ChargeErrorAgreementCurrencyMismatch,
+	ChargeErrorAgreementAmountMismatch,
+	ChargeErrorAmountAboveAgreement,
+	ChargeErrorAgreementPeriodAlreadyCharged,
+	ChargeErrorAgreementEnded,
+	ChargeErrorAgreementNotStarted,
+	ChargeErrorAmountAboveCap,
+}
+
+// chargeServerErrorCodes are the 5xx codes that are the charge route's own
+// answer. Any other 5xx, coded or not, is a *TransportError.
+var chargeServerErrorCodes = []string{
+	ChargeErrorOutcomeUnknown,
+	ChargeErrorFailed,
+	ChargeErrorChargesDisabled,
+	ChargeErrorProcessingUnavailable,
 }
 
 // ChargeError means the gateway answered a charge with an error code instead
-// of a charge result: HTTP 409, 422, 502 or 503 with one of the ChargeError*
-// codes on ErrorCode (see each constant for what to do). HTTPStatus carries
-// the status, Message the gateway's own text.
+// of a charge result: HTTP 404, 409, 422, 502 or 503 with one of the
+// ChargeError* codes on ErrorCode (see each constant for what to do).
+// HTTPStatus carries the status, Message the gateway's own text.
 //
 // Charge is the charge row the gateway attached to its answer, when it did:
 // always for CHARGE_OUTCOME_UNKNOWN, sometimes for CHARGE_FAILED, never for
@@ -424,10 +634,11 @@ var ChargeErrorCodes = []string{
 //		// poll client.GetStatus(ctx, chargeErr.TransactionID); do not retry under a new key
 //	}
 //
-// Only authentication (401/403, *AuthError), an id that is not yours (404,
-// *APIError), validation (400, *APIError), rate limiting (429,
-// *RateLimitError) and network failures or a 5xx without a code
-// (*TransportError) keep their generic errors on this route.
+// Only authentication (401/403, *AuthError), validation (400, *APIError),
+// rate limiting (429, *RateLimitError), network failures and a 5xx without
+// one of the charge route's own 5xx codes (*TransportError, with the code
+// when there was one) keep their generic errors on this route. A 404 with a
+// code, PAYMENT_METHOD_NOT_FOUND or AGREEMENT_NOT_FOUND, is a *ChargeError.
 type ChargeError struct {
 	baseError
 	HTTPStatus int
@@ -461,7 +672,8 @@ var RevokeErrorCodes = []string{
 // RevokeError means the gateway refused to revoke a stored payment method:
 // HTTP 502 or 503 with one of the RevokeError* codes on ErrorCode. Nothing
 // changed either way. An id that is not yours is still the generic *APIError
-// with HTTPStatus 404.
+// with HTTPStatus 404. Any other 5xx is a *TransportError, with the code when
+// there was one.
 type RevokeError struct {
 	baseError
 	HTTPStatus int
@@ -555,8 +767,9 @@ var RefundFailureCodes = []string{
 // A failed refund is not a *RefundError: it comes back as a Refund with Status
 // RefundStatusFailed and a FailureCode. Authentication (401/403, *AuthError),
 // rate limiting (429, *RateLimitError) and network failures or any 5xx
-// (*TransportError: nothing was queued, retry with the SAME key) keep their
-// generic errors on these routes.
+// (*TransportError: nothing was queued, retry with the SAME key; a 503
+// MERCHANT_API_UNAVAILABLE keeps its code on TransportError.ErrorCode) keep
+// their generic errors on these routes.
 type RefundError struct {
 	baseError
 	HTTPStatus int
@@ -599,14 +812,24 @@ type APIError struct {
 
 // TransportError means a network-level failure, a timeout, or a 5xx. The request
 // may or may not have reached the API, so retry WITH THE SAME idempotency key: a
-// retried key never creates a second payment. CreateCheckoutSessionWithRetry does
-// exactly that.
+// retried key never creates a second payment. The client retries it for you on
+// the keyed writes and the reads (see WithMaxRetries) before you see it.
 //
 // Err is the underlying cause when there was one, reachable with errors.Unwrap
 // or errors.As.
+//
+// HTTPStatus is the 5xx status, 0 when no response arrived. ErrorCode is the
+// API's code when the 5xx carried one, for example
+// ErrorCodeMerchantAPIUnavailable or ErrorCodeInternalError, and empty
+// otherwise. Raw is the envelope of that 5xx, nil when it was not JSON.
 type TransportError struct {
 	baseError
-	Err error
+	Err        error
+	HTTPStatus int
+	ErrorCode  string
+	// Raw is the whole envelope the API sent with the 5xx, for fields not
+	// modelled above.
+	Raw json.RawMessage
 }
 
 // Unwrap exposes the underlying network error, if any.

@@ -324,18 +324,42 @@ func TestChargeErrorsWithoutDataHaveNoCharge(t *testing.T) {
 	}
 }
 
-// The generic statuses keep their generic errors, code and all.
-func TestAChargeAgainstAMethodThatIsNotYoursIsA404(t *testing.T) {
-	server, _ := newTestServer(t, chargeEnvelope(http.StatusNotFound, "PAYMENT_METHOD_NOT_FOUND", "No stored payment method with this id.", nil))
+// A coded 404 on the charge route is a charge error, like every other coded
+// answer of the route: a caller that catches *ChargeError sees all of them.
+func TestACoded404OnAChargeIsAChargeError(t *testing.T) {
+	for _, code := range []string{ChargeErrorPaymentMethodNotFound, ChargeErrorAgreementNotFound} {
+		t.Run(code, func(t *testing.T) {
+			server, _ := newTestServer(t, chargeEnvelope(http.StatusNotFound, code, "Not found.", nil))
+			client := newTestClient(t, server.URL)
+
+			_, err := client.ChargePaymentMethod(context.Background(), testPaymentMethodID, testChargeParams())
+			var chargeErr *ChargeError
+			if !errors.As(err, &chargeErr) {
+				t.Fatalf("got %T (%v), want *ChargeError", err, err)
+			}
+			if chargeErr.HTTPStatus != http.StatusNotFound || chargeErr.ErrorCode != code {
+				t.Fatalf("got %d %q, want 404 %s", chargeErr.HTTPStatus, chargeErr.ErrorCode, code)
+			}
+		})
+	}
+}
+
+// A 5xx that is not one of the charge route's own codes is the platform
+// failing, not a charge answer: a *TransportError that keeps the code.
+func TestAMiddleware500OnAChargeIsATransportErrorWithItsCode(t *testing.T) {
+	server, _ := newTestServer(t, reply{Status: http.StatusInternalServerError, Body: map[string]any{
+		"success": false,
+		"error":   map[string]any{"code": ErrorCodeInternalError, "message": "An unexpected error occurred", "statusCode": 500},
+	}})
 	client := newTestClient(t, server.URL)
 
 	_, err := client.ChargePaymentMethod(context.Background(), testPaymentMethodID, testChargeParams())
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("got %T (%v), want *APIError", err, err)
+	var transportErr *TransportError
+	if !errors.As(err, &transportErr) {
+		t.Fatalf("got %T (%v), want *TransportError", err, err)
 	}
-	if apiErr.HTTPStatus != http.StatusNotFound || apiErr.ErrorCode != "PAYMENT_METHOD_NOT_FOUND" {
-		t.Fatalf("got %d %q, want 404 PAYMENT_METHOD_NOT_FOUND", apiErr.HTTPStatus, apiErr.ErrorCode)
+	if transportErr.HTTPStatus != http.StatusInternalServerError || transportErr.ErrorCode != ErrorCodeInternalError {
+		t.Fatalf("got %d %q, want 500 %s", transportErr.HTTPStatus, transportErr.ErrorCode, ErrorCodeInternalError)
 	}
 }
 
